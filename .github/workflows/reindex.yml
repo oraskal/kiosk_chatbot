@@ -1,0 +1,37 @@
+name: Reindex to Supabase
+
+on:
+  workflow_dispatch:
+
+jobs:
+  reindex:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run reindex
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_CHAT_MODEL: ${{ secrets.OPENAI_CHAT_MODEL }}
+          OPENAI_EMBEDDING_MODEL: ${{ secrets.OPENAI_EMBEDDING_MODEL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VECTOR_TABLE_NAME: ${{ secrets.VECTOR_TABLE_NAME }}
+          VECTOR_QUERY_NAME: ${{ secrets.VECTOR_QUERY_NAME }}
+          CSV_SOURCE_DIR: data/input
+          RAG_TOP_K: ${{ secrets.RAG_TOP_K }}
+          HIGH_CONFIDENCE_THRESHOLD: ${{ secrets.HIGH_CONFIDENCE_THRESHOLD }}
+          LOW_CONFIDENCE_THRESHOLD: ${{ secrets.LOW_CONFIDENCE_THRESHOLD }}
+          NEXT_PUBLIC_APP_NAME: ${{ secrets.NEXT_PUBLIC_APP_NAME }}
+        run: npm run reindex
