@@ -90,27 +90,8 @@ a {
   margin: 0;
   max-width: 760px;
   color: var(--text-muted);
-  line-height: 1.7;
-}
-
-.hero-points {
-  margin: 22px 0 0;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  gap: 10px;
-}
-
-.hero-points li {
-  display: flex;
-  gap: 10px;
-  color: var(--text-muted);
-}
-
-.hero-points li::before {
-  content: "•";
-  color: var(--accent);
-  font-weight: 700;
+  line-height: 1.65;
+  font-size: 0.97rem;
 }
 
 .workspace-grid {
@@ -124,8 +105,13 @@ a {
 }
 
 .panel-title {
-  margin: 0 0 8px;
-  font-size: 1.2rem;
+  margin: 0 0 16px;
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.results-header .panel-title {
+  margin-bottom: 0;
 }
 
 .panel-copy {
@@ -153,34 +139,13 @@ a {
 
 .field-row {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin: 14px 0 10px;
-  gap: 12px;
+  justify-content: flex-end;
+  margin: 8px 0 12px;
+}
+
+.char-count {
   color: var(--text-muted);
-  font-size: 0.94rem;
-}
-
-.chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 18px;
-}
-
-.chip {
-  border: 1px solid rgba(15, 118, 110, 0.14);
-  background: rgba(255, 255, 255, 0.88);
-  color: var(--text);
-  padding: 10px 14px;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: transform 120ms ease, border-color 120ms ease;
-}
-
-.chip:hover {
-  transform: translateY(-1px);
-  border-color: rgba(15, 118, 110, 0.36);
+  font-size: 0.88rem;
 }
 
 .primary-button,
@@ -230,7 +195,7 @@ a {
 
 .results-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 18px;
@@ -303,27 +268,13 @@ a {
 }
 
 .empty-state {
-  min-height: 540px;
+  min-height: 440px;
   display: grid;
   place-items: center;
   padding: 28px;
   text-align: center;
   color: var(--text-muted);
-  line-height: 1.7;
-}
-
-.empty-state strong {
-  display: block;
-  margin-bottom: 8px;
-  color: var(--text);
-  font-size: 1.04rem;
-}
-
-.footer-note {
-  margin-top: 18px;
-  color: var(--text-muted);
-  font-size: 0.9rem;
-  line-height: 1.65;
+  font-size: 0.96rem;
 }
 
 @media (max-width: 980px) {
