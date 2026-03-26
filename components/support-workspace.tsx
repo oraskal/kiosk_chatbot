@@ -82,8 +82,13 @@ export function SupportWorkspace() {
         const payload = (await response.json()) as ChatApiResponse | { error?: string };
 
         if (!response.ok || !("suspected_causes" in payload)) {
-          throw new Error(payload.error || "요청을 처리하지 못했습니다.");
-        }
+          const errorMessage =
+            "error" in payload && typeof payload.error === "string"
+              ? payload.error
+              : "요청을 처리하지 못했습니다.";
+
+          throw new Error(errorMessage);
+      }
 
         setResult(payload);
         setStatusMessage("답변 초안이 준비되었습니다. 필요한 문장만 바로 복사해서 활용하시면 됩니다.");
