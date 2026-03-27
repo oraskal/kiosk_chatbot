@@ -104,7 +104,7 @@ export function SupportWorkspace() {
 
             <textarea
               className="prompt-box"
-              placeholder="예) 키오스크에서 접수는 되는데 바코드 출력이 안 되고, 재부팅해도 동일하다고 합니다."
+              placeholder="예) 키오스크에서 수납 시 프린터 출력이 안 되고, 재부팅해도 동일하다고 합니다."
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
             />
