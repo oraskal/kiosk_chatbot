@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const appConfigSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
-  OPENAI_CHAT_MODEL: z.string().default("gpt-4.1-mini"),
+  OPENAI_CHAT_MODEL: z.string().default("gpt-5.1"),
   OPENAI_EMBEDDING_MODEL: z.string().default("text-embedding-3-small"),
   SUPABASE_URL: z.string().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),

@@ -1,6 +1,6 @@
 import { config as loadEnv } from "dotenv";
 
-import { buildSupportCaseDocuments, getIngestPreview } from "@/lib/ingest/case-loader";
+import { getIngestPreview } from "@/lib/ingest/case-loader";
 import { clearVectorTable, getSupabaseVectorStore } from "@/lib/rag/vector-store";
 
 async function main() {
@@ -15,8 +15,9 @@ async function main() {
   console.log(`총 CSV 행 수: ${preview.totalRows}`);
   console.log(`Ground truth 포함 행 수: ${preview.groundTruthRows}`);
   console.log(`Auto only 행 수: ${preview.autoOnlyRows}`);
+  console.log(`Baseline 가이드 문서 청크 수: ${preview.guideDocuments}`);
 
-  const documents = buildSupportCaseDocuments(preview.rows);
+  const documents = preview.documents;
 
   if (shouldReset) {
     console.log("기존 벡터 문서를 비우는 중...");

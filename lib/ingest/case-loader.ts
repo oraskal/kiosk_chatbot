@@ -8,6 +8,15 @@ import { getAppConfig } from "@/lib/config";
 import type { SupportCaseRow } from "@/lib/types";
 
 type RawCsvRow = Record<string, string | undefined>;
+type GuideSection = {
+  title: string;
+  body: string;
+};
+type GuideChunk = GuideSection & {
+  chunkIndex: number;
+};
+
+const BASELINE_GUIDE_FILE_NAME = "kiosk_baseline_guide.md";
 
 function clean(value: string | undefined) {
   return (value ?? "").trim();
@@ -30,6 +39,92 @@ function buildSearchableText(row: SupportCaseRow) {
     `이슈 카테고리: ${row.issueCategory || "기록 없음"}`,
     `이슈 세부유형: ${row.issueSubtypeLabel || row.issueSubtype || "기록 없음"}`,
   ].join("\n");
+}
+
+function splitGuideIntoSections(markdown: string) {
+  const normalized = markdown.replace(/\r\n/g, "\n").trim();
+
+  if (!normalized) {
+    return [] as GuideSection[];
+  }
+
+  const lines = normalized.split("\n");
+  const sections: GuideSection[] = [];
+  let currentTitle = "가이드 개요";
+  let currentLines: string[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith("## ")) {
+      const body = currentLines.join("\n").trim();
+
+      if (body) {
+        sections.push({
+          title: currentTitle,
+          body,
+        });
+      }
+
+      currentTitle = line.replace(/^##\s+/, "").trim() || "제목 없음";
+      currentLines = [];
+      continue;
+    }
+
+    currentLines.push(line);
+  }
+
+  const finalBody = currentLines.join("\n").trim();
+
+  if (finalBody) {
+    sections.push({
+      title: currentTitle,
+      body: finalBody,
+    });
+  }
+
+  return sections;
+}
+
+function chunkGuideSection(section: GuideSection, chunkCharLimit = 2200) {
+  const paragraphs = section.body
+    .split(/\n{2,}/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (paragraphs.length === 0) {
+    return [] as GuideChunk[];
+  }
+
+  const chunks: GuideChunk[] = [];
+  let buffer: string[] = [];
+  let currentLength = 0;
+
+  for (const paragraph of paragraphs) {
+    const nextLength = currentLength + paragraph.length + (buffer.length > 0 ? 2 : 0);
+
+    if (nextLength > chunkCharLimit && buffer.length > 0) {
+      chunks.push({
+        title: section.title,
+        body: buffer.join("\n\n"),
+        chunkIndex: chunks.length + 1,
+      });
+      buffer = [paragraph];
+      currentLength = paragraph.length;
+      continue;
+    }
+
+    buffer.push(paragraph);
+    currentLength = nextLength;
+  }
+
+  if (buffer.length > 0) {
+    chunks.push({
+      title: section.title,
+      body: buffer.join("\n\n"),
+      chunkIndex: chunks.length + 1,
+    });
+  }
+
+  return chunks;
 }
 
 function toSupportCaseRow(raw: RawCsvRow, rowNumber: number, sourceFile: string): SupportCaseRow {
@@ -89,6 +184,39 @@ export async function findCsvFiles() {
   return [...new Set(files)].sort((left, right) => left.localeCompare(right));
 }
 
+export async function findBaselineGuideFiles() {
+  const config = getAppConfig();
+  const candidates = [path.resolve(process.cwd(), config.CSV_SOURCE_DIR), process.cwd()];
+  const seen = new Set<string>();
+  const files: string[] = [];
+
+  for (const directory of candidates) {
+    if (seen.has(directory)) {
+      continue;
+    }
+
+    seen.add(directory);
+
+    try {
+      const entries = await readdir(directory, { withFileTypes: true });
+
+      for (const entry of entries) {
+        if (!entry.isFile()) {
+          continue;
+        }
+
+        if (entry.name.toLowerCase() === BASELINE_GUIDE_FILE_NAME) {
+          files.push(path.join(directory, entry.name));
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return [...new Set(files)].sort((left, right) => left.localeCompare(right));
+}
+
 export async function loadSupportCaseRows() {
   const files = await findCsvFiles();
 
@@ -129,6 +257,7 @@ export function buildSupportCaseDocuments(rows: SupportCaseRow[]) {
       new Document({
         pageContent: buildSearchableText(row),
         metadata: {
+          source_type: "support_case",
           case_id: row.caseId,
           case_key: row.caseKey,
           clinic_name: row.clinicName,
@@ -149,14 +278,60 @@ export function buildSupportCaseDocuments(rows: SupportCaseRow[]) {
   );
 }
 
+export async function buildBaselineGuideDocuments() {
+  const files = await findBaselineGuideFiles();
+
+  if (files.length === 0) {
+    return [] as Document[];
+  }
+
+  const documents: Document[] = [];
+
+  for (const file of files) {
+    const markdown = await readFile(file, "utf-8");
+    const sections = splitGuideIntoSections(markdown);
+
+    for (const section of sections) {
+      const sectionChunks = chunkGuideSection(section);
+
+      for (const chunk of sectionChunks) {
+        documents.push(
+          new Document({
+            pageContent: [
+              "문서 유형: 키오스크 기준 가이드",
+              `섹션: ${chunk.title}`,
+              "",
+              chunk.body,
+            ].join("\n"),
+            metadata: {
+              source_type: "baseline_guide",
+              guide_section_title: chunk.title,
+              guide_chunk_index: chunk.chunkIndex,
+              source_file: path.basename(file),
+              quality_tier: "guide_baseline",
+            },
+          }),
+        );
+      }
+    }
+  }
+
+  return documents;
+}
+
 export async function getIngestPreview() {
   const rows = await loadSupportCaseRows();
+  const caseDocuments = buildSupportCaseDocuments(rows);
+  const guideDocuments = await buildBaselineGuideDocuments();
+  const documents = [...caseDocuments, ...guideDocuments];
 
   return {
     totalRows: rows.length,
     groundTruthRows: rows.filter((row) => row.qualityTier === "ground_truth").length,
     autoOnlyRows: rows.filter((row) => row.qualityTier === "auto_only").length,
+    guideDocuments: guideDocuments.length,
+    totalDocuments: documents.length,
     rows,
-    documents: buildSupportCaseDocuments(rows),
+    documents,
   };
 }

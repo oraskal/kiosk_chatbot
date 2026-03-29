@@ -4,20 +4,66 @@ import { useMemo, useState, useTransition } from "react";
 
 import type { ChatApiResponse } from "@/lib/types";
 
+function renderGuideLine(line: string, index: number) {
+  if (!line.trim()) {
+    return <div key={`spacer-${index}`} className="guide-spacer" />;
+  }
+
+  if (line.trim() === "---") {
+    return <hr key={`divider-${index}`} className="guide-divider" />;
+  }
+
+  if (line.startsWith("## ")) {
+    return (
+      <h4 key={`h2-${index}`} className="guide-h2">
+        {line.replace(/^##\s+/, "")}
+      </h4>
+    );
+  }
+
+  if (line.startsWith("### ")) {
+    return (
+      <h5 key={`h3-${index}`} className="guide-h3">
+        {line.replace(/^###\s+/, "")}
+      </h5>
+    );
+  }
+
+  if (/^[-*]\s+/.test(line) || /^\d+\.\s+/.test(line)) {
+    return (
+      <p key={`li-${index}`} className="guide-item">
+        {line}
+      </p>
+    );
+  }
+
+  return (
+    <p key={`p-${index}`} className="guide-text">
+      {line}
+    </p>
+  );
+}
+
 function buildCopyText(result: ChatApiResponse) {
-  const lines = [
-    "의심되는 원인",
-    ...result.suspected_causes.map((item, index) => `${index + 1}. ${item}`),
-    "",
-    "우선 확인사항",
-    ...result.checks.map((item, index) => `${index + 1}. ${item}`),
-    "",
-    "권장 대응 방향",
-    ...result.next_actions.map((item, index) => `${index + 1}. ${item}`),
-    "",
-    "병원 안내용 답변 초안",
-    result.customer_reply_draft,
-  ];
+  const lines =
+    result.query_mode === "guide"
+      ? [
+          "가이드라인 안내",
+          result.guide_overview,
+          "",
+          "원문 발췌",
+          ...result.guide_steps,
+        ]
+      : [
+          "의심되는 원인",
+          ...result.suspected_causes.map((item, index) => `${index + 1}. ${item}`),
+          "",
+          "우선 확인사항",
+          ...result.checks.map((item, index) => `${index + 1}. ${item}`),
+          "",
+          "권장 대응 방향",
+          ...result.next_actions.map((item, index) => `${index + 1}. ${item}`),
+        ];
 
   if (result.most_similar_case_summary) {
     lines.push("", `가장 유사한 사례 요약: ${result.most_similar_case_summary}`);
@@ -41,6 +87,7 @@ export function SupportWorkspace() {
     if (result.confidence_level === "low") return "warning";
     return "";
   }, [result]);
+  const isGuideMode = result?.query_mode === "guide";
 
   async function handleSubmit() {
     if (!prompt.trim()) {
@@ -94,7 +141,7 @@ export function SupportWorkspace() {
           <span className="eyebrow">Ubcare Internal RAG Assistant</span>
           <h1 className="hero-title">유비케어 병원고객팀 상담지원 챗봇</h1>
           <p className="hero-subtitle">
-            상담 중 접수된 문제상황을 입력하면 과거 유사 사례를 검색하여 원인·확인사항·대응 방향·답변 초안을 정리합니다.
+            상담 중 접수된 문제상황을 입력하면 과거 유사 사례와 기준 가이드를 검색해 원인·확인사항·대응 방향을 정리합니다.
           </p>
         </section>
 
@@ -139,36 +186,51 @@ export function SupportWorkspace() {
                 </div>
 
                 <div className="results-grid">
-                  <section className="result-card">
-                    <h3>의심되는 원인</h3>
-                    <ol className="result-list">
-                      {result.suspected_causes.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ol>
-                  </section>
+                  {isGuideMode && (
+                    <section className="result-card">
+                      <h3>가이드라인 안내</h3>
+                      <div className="reply-box">{result.guide_overview}</div>
+                      {result.guide_steps.length > 0 && (
+                        <div className="guide-excerpt">{result.guide_steps.map((line, index) => renderGuideLine(line, index))}</div>
+                      )}
+                    </section>
+                  )}
+
+                  {!isGuideMode && (
+                    <section className="result-card">
+                      <h3>의심되는 원인</h3>
+                      <ol className="result-list">
+                        {result.suspected_causes.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ol>
+                    </section>
+                  )}
+
+                  {result.checks.length > 0 && (
+                    <section className="result-card">
+                      <h3>우선 확인사항</h3>
+                      <ol className="result-list">
+                        {result.checks.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ol>
+                    </section>
+                  )}
+
+                  {result.next_actions.length > 0 && (
+                    <section className="result-card">
+                      <h3>권장 대응 방향</h3>
+                      <ol className="result-list">
+                        {result.next_actions.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ol>
+                    </section>
+                  )}
 
                   <section className="result-card">
-                    <h3>우선 확인사항</h3>
-                    <ol className="result-list">
-                      {result.checks.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ol>
-                  </section>
-
-                  <section className="result-card">
-                    <h3>권장 대응 방향</h3>
-                    <ol className="result-list">
-                      {result.next_actions.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ol>
-                  </section>
-
-                  <section className="result-card">
-                    <h3>병원 안내용 답변 초안</h3>
-                    <div className="reply-box">{result.customer_reply_draft}</div>
+                    <h3>응답 메타</h3>
                     <div className="meta-row">
                       <span className="meta-pill">신뢰도: {result.confidence_level}</span>
                       <span className="meta-pill">유사 사례 {result.similar_case_count}건</span>

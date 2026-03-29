@@ -1,6 +1,7 @@
 export type ResolutionResult = "resolved" | "monitoring" | "workaround" | "unresolved" | "";
 
 export type ConfidenceLevel = "high" | "medium" | "low";
+export type QueryMode = "incident" | "guide";
 
 export interface SupportCaseRow {
   sourceFile: string;
@@ -35,10 +36,12 @@ export interface SimilarCaseSummary {
 }
 
 export interface ChatApiResponse {
+  query_mode: QueryMode;
   suspected_causes: string[];
   checks: string[];
   next_actions: string[];
-  customer_reply_draft: string;
+  guide_overview: string;
+  guide_steps: string[];
   confidence_level: ConfidenceLevel;
   confidence_note: string;
   similar_case_count: number;
