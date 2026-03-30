@@ -1,48 +1,10 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import type { ChatApiResponse } from "@/lib/types";
-
-function renderGuideLine(line: string, index: number) {
-  if (!line.trim()) {
-    return <div key={`spacer-${index}`} className="guide-spacer" />;
-  }
-
-  if (line.trim() === "---") {
-    return <hr key={`divider-${index}`} className="guide-divider" />;
-  }
-
-  if (line.startsWith("## ")) {
-    return (
-      <h4 key={`h2-${index}`} className="guide-h2">
-        {line.replace(/^##\s+/, "")}
-      </h4>
-    );
-  }
-
-  if (line.startsWith("### ")) {
-    return (
-      <h5 key={`h3-${index}`} className="guide-h3">
-        {line.replace(/^###\s+/, "")}
-      </h5>
-    );
-  }
-
-  if (/^[-*]\s+/.test(line) || /^\d+\.\s+/.test(line)) {
-    return (
-      <p key={`li-${index}`} className="guide-item">
-        {line}
-      </p>
-    );
-  }
-
-  return (
-    <p key={`p-${index}`} className="guide-text">
-      {line}
-    </p>
-  );
-}
 
 function buildCopyText(result: ChatApiResponse) {
   const lines =
@@ -88,6 +50,13 @@ export function SupportWorkspace() {
     return "";
   }, [result]);
   const isGuideMode = result?.query_mode === "guide";
+  const guideMarkdown = useMemo(() => {
+    if (!result || result.query_mode !== "guide") {
+      return "";
+    }
+
+    return result.guide_steps.join("\n");
+  }, [result]);
 
   async function handleSubmit() {
     if (!prompt.trim()) {
@@ -190,8 +159,19 @@ export function SupportWorkspace() {
                     <section className="result-card">
                       <h3>가이드라인 안내</h3>
                       <div className="reply-box">{result.guide_overview}</div>
-                      {result.guide_steps.length > 0 && (
-                        <div className="guide-excerpt">{result.guide_steps.map((line, index) => renderGuideLine(line, index))}</div>
+                      {guideMarkdown && (
+                        <div className="guide-markdown-shell">
+                          <article className="markdown-body guide-markdown">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+                              }}
+                            >
+                              {guideMarkdown}
+                            </ReactMarkdown>
+                          </article>
+                        </div>
                       )}
                     </section>
                   )}

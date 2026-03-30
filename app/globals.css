@@ -234,45 +234,61 @@ a {
   line-height: 1.7;
 }
 
-.guide-excerpt {
+.guide-markdown-shell {
   margin-top: 12px;
-  padding: 14px;
   border: 1px solid rgba(29, 36, 51, 0.08);
-  border-radius: 14px;
+  border-radius: 16px;
   background: #fff;
+  overflow: hidden;
 }
 
-.guide-h2 {
-  margin: 10px 0 8px;
-  font-size: 1rem;
-  font-weight: 800;
-}
-
-.guide-h3 {
-  margin: 8px 0 6px;
-  font-size: 0.94rem;
-  font-weight: 700;
-}
-
-.guide-text,
-.guide-item {
-  margin: 0 0 6px;
-  line-height: 1.65;
+.guide-markdown.markdown-body {
+  padding: 22px;
+  background: transparent;
   color: var(--text);
+  font-family: var(--font-body), sans-serif;
+  font-size: 0.95rem;
+  line-height: 1.7;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 
-.guide-item {
-  padding-left: 8px;
+.guide-markdown.markdown-body > :first-child {
+  margin-top: 0;
 }
 
-.guide-divider {
-  border: 0;
-  border-top: 1px dashed rgba(29, 36, 51, 0.2);
-  margin: 10px 0;
+.guide-markdown.markdown-body > :last-child {
+  margin-bottom: 0;
 }
 
-.guide-spacer {
-  height: 6px;
+.guide-markdown.markdown-body pre {
+  border-radius: 12px;
+  overflow: auto;
+}
+
+.guide-markdown.markdown-body code,
+.guide-markdown.markdown-body pre,
+.guide-markdown.markdown-body tt {
+  font-family: var(--font-mono), monospace;
+}
+
+.guide-markdown.markdown-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.guide-markdown.markdown-body blockquote {
+  color: var(--text-muted);
+}
+
+.guide-markdown.markdown-body a {
+  color: var(--accent-strong);
+}
+
+.guide-markdown.markdown-body hr {
+  background-color: rgba(29, 36, 51, 0.12);
 }
 
 .meta-row {

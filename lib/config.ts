@@ -1,11 +1,11 @@
 import { z } from "zod";
 
 const appConfigSchema = z.object({
-  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_API_KEY: z.string().trim().optional(),
   OPENAI_CHAT_MODEL: z.string().default("gpt-5.1"),
   OPENAI_EMBEDDING_MODEL: z.string().default("text-embedding-3-small"),
-  SUPABASE_URL: z.string().optional(),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
+  SUPABASE_URL: z.string().trim().optional(),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().trim().optional(),
   VECTOR_TABLE_NAME: z.string().default("support_case_documents"),
   VECTOR_QUERY_NAME: z.string().default("match_support_case_documents"),
   CSV_SOURCE_DIR: z.string().default("data/input"),

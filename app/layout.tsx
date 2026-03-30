@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { JetBrains_Mono, Noto_Sans_KR } from "next/font/google";
 
+import "github-markdown-css/github-markdown-light.css";
 import "./globals.css";
 
 const bodyFont = Noto_Sans_KR({
