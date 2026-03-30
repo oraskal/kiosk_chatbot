@@ -255,6 +255,82 @@ function compactList(items: string[], maxItems: number) {
   return output;
 }
 
+function inferBaselinePriorityItem(message: string, guideSnippets: RetrievedGuideSnippet[]) {
+  const haystack = `${message}\n${guideSnippets
+    .map((snippet) => `${snippet.sectionTitle}\n${snippet.content}`)
+    .join("\n")}`.toLowerCase();
+
+  const isHalfKiosk = haystack.includes("하프");
+  const isFullKiosk = haystack.includes("풀");
+  const hasPrinterSignal =
+    haystack.includes("프린터") ||
+    haystack.includes("출력") ||
+    haystack.includes("영수증") ||
+    haystack.includes("처방전");
+  const hasPaymentSignal =
+    haystack.includes("결제") ||
+    haystack.includes("카드") ||
+    haystack.includes("단말기") ||
+    haystack.includes("ksnet") ||
+    haystack.includes("smartro") ||
+    haystack.includes("vcat");
+  const hasReceptionSignal =
+    haystack.includes("접수") || haystack.includes("신규환자") || haystack.includes("문진");
+  const hasDoctorRoomSignal =
+    haystack.includes("진료실") || haystack.includes("일시정지") || haystack.includes("접수시간");
+  const hasAccessibilitySignal =
+    haystack.includes("음성") || haystack.includes("장애인") || haystack.includes("언어팩");
+
+  if (hasPrinterSignal && isHalfKiosk) {
+    return "하프 키오스크 프린터 연결 방식(호스트 네임 포트, 기본 프린터)";
+  }
+
+  if (hasPrinterSignal && isFullKiosk) {
+    return "풀 키오스크 지정프린터 설정(용지함2개, 172.25.123.99 포트, USB 제거)";
+  }
+
+  if (hasPrinterSignal) {
+    return "프린터 기본 연결 및 포트 설정";
+  }
+
+  if (hasPaymentSignal && isHalfKiosk) {
+    return "하프 키오스크 결제 옵션값과 SMARTRO/VCAT 기본 설정";
+  }
+
+  if (hasPaymentSignal && isFullKiosk) {
+    return "풀 키오스크 KSNET 에이전트와 결제 포트 기본 설정";
+  }
+
+  if (hasPaymentSignal) {
+    return "결제 에이전트, VAN, 포트 기본 설정";
+  }
+
+  if (hasReceptionSignal) {
+    return "접수 기본 옵션(신규환자, 진료과, 사전문진, 임시접수)";
+  }
+
+  if (hasDoctorRoomSignal) {
+    return "진료실 운영 설정(접수시간, 일시정지, 메인화면 연결)";
+  }
+
+  if (hasAccessibilitySignal) {
+    return "장애인 메뉴와 음성안내 기본 설정";
+  }
+
+  return "서비스 사용 ON, 기기 종류/VAN 일치, 메인화면 연결, 테스트 설정 원복";
+}
+
+function buildBaselinePriorityCheck(message: string, guideSnippets: RetrievedGuideSnippet[]) {
+  const priorityItem = inferBaselinePriorityItem(message, guideSnippets);
+  return `배포 기본 세팅 기준으로 보면 ${priorityItem} 항목을 우선 확인해야 합니다.`;
+}
+
+function ensureBaselineFirstChecks(checks: string[], message: string, guideSnippets: RetrievedGuideSnippet[]) {
+  const baselinePriorityCheck = buildBaselinePriorityCheck(message, guideSnippets);
+  const remainingChecks = checks.filter((item) => !normalizeBulletText(item).startsWith("배포 기본 세팅 기준으로 보면"));
+  return compactList([baselinePriorityCheck, ...remainingChecks], 6);
+}
+
 async function loadBaselineGuideSections() {
   const guidePath = path.resolve(process.cwd(), "data/input/kiosk_baseline_guide.md");
   const text = await readFile(guidePath, "utf-8");
@@ -471,7 +547,10 @@ export async function analyzeSupportIssue(message: string, topK?: number): Promi
         "질문 맥락을 먼저 파악해 장애 대응 질문인지, 단순 기능/설정 안내 질문인지 구분하라.",
         "검색된 사례와 가이드는 참고자료이지 절대적인 정답이 아니다.",
         "키오스크 메인 기준 가이드(Baseline)는 우선 확인사항/권장 대응 방향의 기준값으로 적극 반영하라.",
+        "incident 모드에서는 과거 지원내역보다 먼저 현재 현장이 배포 기본 세팅에서 이탈했는지 확인하라.",
+        "incident 모드에서는 유사 사례를 바로 답으로 삼지 말고, 기본 설정 이탈 여부를 먼저 점검한 뒤 보조 근거로 활용하라.",
         "모드가 incident(장애/오류)라면 현재 문제상황과 가장 가까운 패턴을 찾아 의심 원인, 우선 확인사항, 권장 대응 방향을 정리하라.",
+        "incident 모드에서는 checks의 첫 번째 항목을 반드시 `배포 기본 세팅 기준으로 보면 ... 항목을 우선 확인해야 합니다.` 형식으로 작성하라.",
         "모드가 guide(설정/기능 질문)라면 원인 추정을 억지로 만들지 말고 baseline 가이드 기준의 절차/설정 포인트를 중심으로 작성하라.",
         "guide 모드일 때는 guide_overview(핵심 요약)와 guide_steps(실행 순서)를 채워라.",
         "incident 모드일 때도 guide_overview는 빈 문자열(\"\"), guide_steps는 빈 배열([])로 반드시 채워라.",
@@ -496,6 +575,7 @@ export async function analyzeSupportIssue(message: string, topK?: number): Promi
         `검색된 키오스크 기준 가이드:\n${formatRetrievedGuideSnippets(guideContext)}`,
         "",
         `검색 신뢰도 등급: ${confidenceLevel}`,
+        "과거 지원내역보다 먼저 기본 설정 이탈 여부를 확인하는 흐름으로 답변하라.",
         "guide 모드에서는 장애 원인 단정 표현을 피하고, 기준 절차/설정 포인트를 명확하게 안내하라.",
         "incident 모드에서는 증상과 근거를 연결해 원인 가설과 확인 포인트를 우선 제시하라.",
         "guide_overview에는 한눈에 이해되는 핵심 가이드 요약을 2~4문장으로 작성하라.",
@@ -508,7 +588,7 @@ export async function analyzeSupportIssue(message: string, topK?: number): Promi
   ]);
 
   const compactedCauses = compactList(structured.suspected_causes, 4);
-  const compactedChecks = compactList(structured.checks, 6);
+  const compactedChecks = ensureBaselineFirstChecks(structured.checks, message, guideContext);
   const compactedActions = compactList(structured.next_actions, 6);
   const similarCases =
     queryMode === "incident"

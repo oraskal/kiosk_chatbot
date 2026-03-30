@@ -1,11 +1,17 @@
 # 유비케어 상담지원 챗봇
 
-유비케어 병원고객팀 상담사가 고객 전화 응대 중 문제상황을 입력하면, 과거 상담 사례 CSV를 검색해서 아래 4가지를 바로 제안하는 내부용 RAG 웹앱입니다.
+유비케어 병원고객팀 상담사가 고객 전화 응대 중 문제상황이나 설정 문의를 입력하면, 과거 상담 사례 CSV와 키오스크 배포 기준 가이드를 함께 검색해 실무형 답변을 만드는 내부용 RAG 웹앱입니다.
+
+장애 대응 질문(`incident`)에서는 아래 3가지를 제안합니다.
 
 - 의심되는 원인
 - 우선 확인사항
 - 권장 대응 방향
-- 병원 안내용 답변 초안
+
+설정/기능 질문(`guide`)에서는 아래 2가지를 제공합니다.
+
+- 가이드라인 안내
+- 기준 가이드 원문 발췌
 
 
 ## 1. 기술 스택
@@ -20,16 +26,20 @@
 중요한 점은 아래입니다.
 
 - 프론트와 백엔드를 같은 저장소에서 함께 관리합니다.
-- CSV는 서비스 실행 중 매번 읽지 않습니다.
-- CSV는 별도 인덱싱 명령어로 Supabase pgvector에 넣습니다.
-- 앱 실행 중에는 Supabase에서 유사 사례를 검색합니다.
+- CSV와 기준 가이드 Markdown은 서비스 실행 중 매번 읽지 않습니다.
+- 입력 원본은 별도 인덱싱 명령어로 Supabase pgvector에 넣습니다.
+- 앱 실행 중에는 Supabase에서 유사 사례와 기준 가이드를 함께 검색합니다.
 
 ## 2. 현재 구현된 기능
 
 - 상담사가 문제상황을 입력할 수 있는 간단한 내부 웹 UI
 - `/api/chat` Route Handler 기반 RAG 응답 생성
-- CSV 파일 여러 개를 읽어 Supabase pgvector에 적재하는 ingest 스크립트
+- 문의를 `incident`/`guide` 로 자동 분류하는 라우팅 로직
+- CSV 사례 데이터와 `kiosk_baseline_guide.md` 를 함께 적재하는 ingest 스크립트
 - `/api/health` 헬스체크 API
+- 장애 답변에서 과거 지원내역보다 기본 설정 이탈 여부를 먼저 보도록 강제하는 로직
+- 장애 답변의 `우선 확인사항` 첫 문장을 `배포 기본 세팅 기준으로 보면 ... 항목을 우선 확인해야 합니다.` 형식으로 보정하는 로직
+- 기준 가이드 질문 시 관련 섹션 요약과 원문 발췌 제공
 - 유사 사례 개수, 최고 유사도 참고값, 가장 유사한 사례 요약 제공
 - 유사 사례가 약할 때 단정하지 않고 확인 포인트 중심으로 답하는 fallback 로직
 
@@ -48,7 +58,8 @@ ubcare-support-rag/
 │  └─ support-workspace.tsx
 ├─ data/
 │  └─ input/
-│     └─ .gitkeep
+│     ├─ kiosk_baseline_guide.md
+│     └─ kiosk_gt_annotation_master.csv
 ├─ lib/
 │  ├─ config.ts
 │  ├─ ingest/
@@ -63,7 +74,6 @@ ubcare-support-rag/
 │  └─ ingest.ts
 ├─ supabase/
 │  └─ schema.sql
-├─ .env.example
 ├─ package.json
 └─ README.md
 ```
@@ -184,13 +194,7 @@ Supabase 프로젝트에서 아래 값을 확인해야 합니다.
 
 ### 7-1. `.env.local` 파일 만들기
 
-PowerShell에서 아래 명령어를 실행합니다.
-
-```powershell
-Copy-Item .env.example .env.local
-```
-
-이제 `.env.local` 파일을 메모장이나 VS Code로 열어서 값을 채웁니다.
+현재 저장소에는 `.env.example` 파일이 없으므로, 프로젝트 루트에 `.env.local` 파일을 직접 만든 뒤 아래 값을 넣습니다.
 
 예시:
 
@@ -228,7 +232,7 @@ NEXT_PUBLIC_APP_NAME=유비케어 상담지원 챗봇
 - `HIGH_CONFIDENCE_THRESHOLD`: 높은 신뢰도로 볼 유사도 기준
 - `LOW_CONFIDENCE_THRESHOLD`: fallback 여부를 판단할 유사도 기준
 
-## 8. CSV 파일 넣기
+## 8. 입력 파일 넣기
 
 권장 위치는 아래 폴더입니다.
 
@@ -239,6 +243,7 @@ data/input
 예를 들어 다음처럼 두면 됩니다.
 
 ```text
+data/input/kiosk_baseline_guide.md
 data/input/kiosk_gt_annotation_master.csv
 ```
 
@@ -247,7 +252,7 @@ data/input/kiosk_gt_annotation_master.csv
 - `data/input`
 - 프로젝트 루트
 
-즉, 이미 루트에 CSV가 있다면 바로 인덱싱이 가능합니다. 다만 운영상 헷갈리지 않게 하려면 앞으로는 `data/input` 에 넣는 것을 권장합니다.
+즉, 이미 루트에 CSV나 `kiosk_baseline_guide.md` 가 있어도 인덱싱은 가능합니다. 다만 운영상 헷갈리지 않게 하려면 앞으로는 둘 다 `data/input` 에 두는 것을 권장합니다.
 
 ## 9. 패키지 설치
 
@@ -264,12 +269,12 @@ npm install
 중요:
 
 - 앱 실행 전에 먼저 인덱싱을 해야 합니다.
-- 인덱싱은 CSV를 읽어서 Supabase pgvector에 넣는 작업입니다.
-- 서비스 실행 중에 CSV를 직접 읽지 않기 때문에 이 단계가 반드시 필요합니다.
+- 인덱싱은 CSV 사례와 기준 가이드 Markdown을 읽어서 Supabase pgvector에 넣는 작업입니다.
+- 서비스 실행 중에 원본 파일을 직접 읽지 않기 때문에 이 단계가 반드시 필요합니다.
 
 ### 10-1. 기존 데이터 비우고 다시 넣기
 
-처음 시작하거나 CSV를 수정했다면 아래 명령어를 권장합니다.
+처음 시작하거나 입력 원본을 수정했다면 아래 명령어를 권장합니다.
 
 ```powershell
 npm run reindex
@@ -280,7 +285,7 @@ npm run reindex
 - `npm run ingest`: 기존 데이터에 추가 적재
 - `npm run reindex`: 기존 벡터 데이터를 비우고 다시 적재
 
-실무에서는 CSV가 바뀌었으면 `npm run reindex` 를 쓰는 편이 안전합니다.
+실무에서는 CSV나 기준 가이드가 바뀌었으면 `npm run reindex` 를 쓰는 편이 안전합니다.
 
 ## 11. 로컬에서 실행하기
 
@@ -311,7 +316,7 @@ http://localhost:3000
 
 - 카드결제는 되는데 영수증이 2장 출력 안 된다고 함
 - 키오스크에서 접수는 되는데 바코드 출력이 안 됨
-- 의사랑 CRM에서 알림톡 발송 실패가 반복됨
+- 하프 키오스크 프린터 연결 방법 알려줘
 
 ## 13. 화면이 안 뜰 때 확인할 곳
 
@@ -369,11 +374,11 @@ http://localhost:3000
 원인:
 
 - 인덱싱이 아직 안 되었거나
-- CSV 파일을 못 찾고 있습니다
+- 입력 원본 파일을 못 찾고 있습니다
 
 해결:
 
-1. CSV가 `data/input` 또는 프로젝트 루트에 있는지 확인합니다.
+1. CSV와 `kiosk_baseline_guide.md` 가 `data/input` 또는 프로젝트 루트에 있는지 확인합니다.
 2. `npm run reindex` 를 다시 실행합니다.
 3. `CSV_SOURCE_DIR` 값이 맞는지 확인합니다.
 
@@ -387,9 +392,9 @@ http://localhost:3000
 
 1. `.env.local` 의 `LOW_CONFIDENCE_THRESHOLD` 를 조금 낮춰봅니다.
 2. `RAG_TOP_K` 를 늘려봅니다.
-3. CSV 데이터 품질을 보강한 뒤 다시 `npm run reindex` 합니다.
+3. CSV 데이터나 기준 가이드를 보강한 뒤 다시 `npm run reindex` 합니다.
 
-## 15. CSV를 수정하면 언제 재인덱싱해야 하나요?
+## 15. 입력 원본을 수정하면 언제 재인덱싱해야 하나요?
 
 아래 중 하나라도 바뀌면 재인덱싱이 필요합니다.
 
@@ -399,6 +404,7 @@ http://localhost:3000
 - `gt_root_cause` 가 바뀌었을 때
 - `gt_resolution_action` 가 바뀌었을 때
 - `gt_customer_reply` 가 바뀌었을 때
+- `kiosk_baseline_guide.md` 내용이 바뀌었을 때
 
 추천 명령어:
 
@@ -409,7 +415,7 @@ npm run reindex
 이유:
 
 - 검색과 생성 품질은 Supabase에 들어간 임베딩 데이터 기준으로 동작하기 때문입니다.
-- CSV만 바꾸고 재인덱싱하지 않으면 앱은 예전 벡터 데이터를 계속 사용합니다.
+- 원본 파일만 바꾸고 재인덱싱하지 않으면 앱은 예전 벡터 데이터를 계속 사용합니다.
 
 ## 16. GitHub에 올리는 방법
 
@@ -448,7 +454,7 @@ git push -u origin main
 중요:
 
 - Vercel은 웹앱 배포용입니다.
-- CSV 인덱싱은 Supabase에 데이터를 넣는 작업이라 보통 로컬에서 먼저 실행합니다.
+- 원본 파일 인덱싱은 Supabase에 데이터를 넣는 작업이라 보통 로컬에서 먼저 실행합니다.
 - 한 번 Supabase에 데이터가 들어가면 Vercel 앱은 그 데이터를 조회합니다.
 
 ### 17-1. GitHub에 코드가 올라간 상태여야 합니다
@@ -482,7 +488,7 @@ git push -u origin main
 참고:
 
 - `CSV_SOURCE_DIR` 는 Vercel 런타임에서는 사실상 필요하지 않습니다.
-- 이유는 배포된 앱이 CSV를 직접 읽지 않고, 이미 Supabase에 적재된 벡터 데이터를 조회하기 때문입니다.
+- 이유는 배포된 앱이 CSV나 기준 가이드를 직접 읽지 않고, 이미 Supabase에 적재된 벡터 데이터를 조회하기 때문입니다.
 
 ### 17-4. Deploy 클릭
 
@@ -509,9 +515,9 @@ git push -u origin main
 8. GitHub 업로드
 9. Vercel 배포
 
-CSV가 나중에 바뀌었을 때:
+입력 원본이 나중에 바뀌었을 때:
 
-1. CSV 파일 교체 또는 추가
+1. CSV 또는 기준 가이드 파일 교체, 추가, 수정
 2. `npm run reindex`
 3. `http://localhost:3000/api/health` 확인
 4. 필요하면 다시 배포
@@ -519,20 +525,28 @@ CSV가 나중에 바뀌었을 때:
 중요:
 
 - 데이터는 Supabase에 있으므로, 단순 UI 코드 변경만 있으면 항상 재인덱싱이 필요한 것은 아닙니다.
-- CSV 내용이 바뀐 경우에만 재인덱싱이 필요합니다.
+- CSV나 기준 가이드 내용이 바뀐 경우에만 재인덱싱이 필요합니다.
 
 ## 19. 설계 요약
 
 이 프로젝트는 아래 흐름으로 작동합니다.
 
-1. CSV를 로컬에서 읽습니다.
-2. 각 상담 row를 검색용 문서로 정리합니다.
+1. CSV 사례와 `kiosk_baseline_guide.md` 를 로컬에서 읽습니다.
+2. CSV는 상담 row 문서로, Markdown은 섹션 단위 가이드 문서로 나눕니다.
 3. OpenAI 임베딩으로 벡터를 만듭니다.
 4. Supabase pgvector 테이블에 저장합니다.
-5. 상담사가 웹에서 문제상황을 입력합니다.
-6. Next.js Route Handler가 유사 사례를 Supabase에서 검색합니다.
-7. 검색된 사례를 바탕으로 OpenAI가 구조화 응답을 생성합니다.
-8. 프론트 화면에 실무형 카드 형태로 보여줍니다.
+5. 상담사가 웹에서 문제상황 또는 설정 문의를 입력합니다.
+6. Next.js Route Handler가 문의를 `incident` 또는 `guide` 로 분류합니다.
+7. Supabase에서 유사 사례와 기준 가이드 문서를 검색합니다.
+8. `incident` 는 기본 설정 이탈 여부를 먼저 점검하는 구조화 응답을 생성합니다.
+9. `guide` 는 기준 가이드 요약과 원문 발췌를 반환합니다.
+10. 프론트 화면에 실무형 카드 형태로 보여줍니다.
+
+### 19-1. 장애 답변 운영 원칙
+
+- 과거 지원내역보다 먼저 현재 현장이 배포 기본 세팅에서 이탈했는지 확인합니다.
+- `우선 확인사항` 첫 문장은 항상 `배포 기본 세팅 기준으로 보면 ... 항목을 우선 확인해야 합니다.` 형식으로 시작하도록 보정합니다.
+- 프린터, 결제, 접수, 진료실, 장애인 메뉴 같은 도메인을 섞지 않고 현재 증상에 맞는 기본 기준을 우선 제시합니다.
 
 ## 20. 앞으로 추가하면 좋은 것
 
