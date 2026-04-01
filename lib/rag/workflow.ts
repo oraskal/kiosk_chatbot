@@ -60,7 +60,6 @@ const POLARITY_VALUES = [
 ] as const;
 const INTENT_VALUES = ["diagnosis", "baseline_check", "official_process", "recovery"] as const;
 const SCOPE_VALUES = ["single_case", "all_cases", "intermittent", "persistent"] as const;
-const PROVENANCE_VALUES = ["baseline_doc", "process_doc", "case_history", "inferred"] as const;
 
 type Domain = (typeof DOMAIN_VALUES)[number];
 type EvidenceObject = (typeof OBJECT_VALUES)[number];
@@ -68,7 +67,7 @@ type Stage = (typeof STAGE_VALUES)[number];
 type Polarity = (typeof POLARITY_VALUES)[number];
 type Intent = (typeof INTENT_VALUES)[number];
 type Scope = (typeof SCOPE_VALUES)[number];
-type EvidenceProvenance = (typeof PROVENANCE_VALUES)[number];
+type EvidenceProvenance = "baseline_doc" | "process_doc" | "case_history" | "inferred";
 type LineFeature = "menu_path" | "test_step" | "config_step" | "install_step" | "process_step" | "cause_hint" | "guide_hint";
 type IncidentSectionKey = "suspected_causes" | "checks" | "actions";
 type RetrievalChannel = "baseline" | "process" | "case";
@@ -82,23 +81,6 @@ type SymptomSignature = {
   intent: Intent;
   scope: Scope;
   symptomSummary: string;
-};
-
-type RetrievedCase = {
-  sourceType: "case";
-  similarity: number;
-  summary: SimilarCaseSummary;
-  customerReplyReference: string;
-  latestActionReference: string;
-  qualityTier: string;
-};
-
-type RetrievedGuide = {
-  sourceType: "guide";
-  similarity: number;
-  sectionTitle: string;
-  content: string;
-  sourceFile: string;
 };
 
 type RetrievedEvidence = {
@@ -384,7 +366,8 @@ function buildIncidentSectionGroups(signature: SymptomSignature, draft: Incident
   };
 }
 
-function withProvenanceLabel(text: string, _provenance?: EvidenceProvenance) {
+function withProvenanceLabel(text: string, provenance?: EvidenceProvenance) {
+  void provenance;
   return normalizeSpace(text);
 }
 
@@ -2107,7 +2090,7 @@ function buildGuideResponseLegacy(
   bundle: GroundedEvidenceBundle,
   highThreshold: number,
   lowThreshold: number,
-): any {
+) {
   const docs = signature.intent === "official_process" ? [...bundle.processDocs, ...bundle.baselineDocs] : [...bundle.baselineDocs, ...bundle.processDocs];
   const topSimilarity = docs[0]?.similarity ?? null;
   const confidenceLevel = determineConfidenceLevel(topSimilarity, highThreshold, lowThreshold);
@@ -2160,7 +2143,7 @@ function finalizeIncidentResponseLegacy(
   bundle: GroundedEvidenceBundle,
   highThreshold: number,
   lowThreshold: number,
-): any {
+) {
   const similarCaseEvidence =
     signature.intent === "official_process"
       ? []
@@ -2402,6 +2385,9 @@ export const __testing = {
   buildIncidentDraft,
   buildDeterministicGrounding,
   runDeterministicIncidentPipeline,
+  buildCompositionPrompt,
+  buildGuideResponseLegacy,
+  finalizeIncidentResponseLegacy,
   buildGuideResponse: buildGuideResponseV2,
   finalizeIncidentResponse: finalizeIncidentResponseV2,
 };
