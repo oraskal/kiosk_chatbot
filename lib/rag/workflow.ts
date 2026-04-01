@@ -352,7 +352,7 @@ function rewritePaymentCause(item: string) {
   }
 
   if (/(van.?사.*통신망|카드사.*승인망|외부.?망|프록시|방화벽|다른 단말)/i.test(normalized)) {
-    return "키오스크 내부 결제 설정과 에이전트 실행 상태가 배포 기본값과 다를 가능성";
+    return "키오스크 내부 결제 설정과 에이전트 실행 상태가 납품 시 기본값과 다를 가능성";
   }
 
   if (/(카드리더기|리더기|멀티패드).*(단독|개별).*(재부팅|재시작)|(카드리더기|리더기|멀티패드).*(재부팅|재시작)/i.test(normalized)) {
@@ -424,20 +424,20 @@ function sanitizePaymentIncidentResponse(
   guideSnippets: RetrievedGuideSnippet[],
 ) {
   const defaultCauses = [
-    "배포 기본 세팅과 다른 결제 설정(VAN, CATID, 포트, 결제 옵션값) 이 반영됐을 가능성",
+    "납품 시 기본 세팅과 다른 결제 설정(VAN, CATID, 포트, 결제 옵션값) 이 반영됐을 가능성",
     "키오스크 내부 카드장치 인식 또는 연결 상태가 불안정할 가능성",
     "결제 에이전트나 드라이버, 자동실행 옵션이 현장 장비와 맞지 않을 가능성",
   ];
   const defaultChecks = [
     "원격지원으로 서비스 사용, 기기 종류, VAN 선택, CATID, 메인화면 연결, 테스트 설정 원복 여부를 확인합니다.",
-    "원격지원으로 결제 에이전트 실행 상태와 아이콘, 자동실행, 옵션값이 배포 기본값과 일치하는지 확인합니다.",
+    "원격지원으로 결제 에이전트 실행 상태와 아이콘, 자동실행, 옵션값이 납품 시 기본값과 일치하는지 확인합니다.",
     "원격지원으로 장치 인식 상태와 결제 프로그램 오류 표시, 장치 관리자 경고 여부를 확인합니다.",
     "필요하면 통화 유지 상태에서 Windows 포함 키오스크 전체 재부팅 후 동일 증상 재현 여부만 다시 확인합니다.",
     "실물 카드 승인 재현은 현장에서만 가능한 경우에 한해 최소 범위로 요청합니다.",
   ];
   const defaultActions = [
     "상담사가 원격지원으로 결제 기본 설정과 에이전트 상태를 먼저 정리한 뒤 재시험 순서를 안내합니다.",
-    "설정 이탈이나 에이전트 비정상이 확인되면 배포 기본값에 맞게 복구 후 카드 승인 재시도를 진행합니다.",
+    "설정 이탈이나 에이전트 비정상이 확인되면 납품 시 기본 설정값에 맞게 복구 후 카드 승인 재시도를 진행합니다.",
     "전체 재부팅 후에도 동일하고 장치 인식 오류가 남으면 키오스크 장치 또는 결제부 점검으로 넘깁니다.",
     "원격지원으로 해결되지 않고 결제부 오류가 반복되면 현장 장치 점검 또는 교체 판단으로 연결합니다.",
   ];
@@ -601,7 +601,7 @@ function buildRelatedGuidePreview(
   lowThreshold: number,
 ): RelatedGuidePreview {
   const answerParts = [...suspectedCauses, ...checks, ...nextActions];
-  const hasBaselineSignal = answerParts.some((item) => /(배포 기본|기본 세팅|기본 설정|기본값|이탈)/.test(item));
+  const hasBaselineSignal = answerParts.some((item) => /(납품 시 기본|기본 세팅|기본 설정|기본값|이탈)/.test(item));
 
   if (!hasBaselineSignal) {
     return createEmptyRelatedGuidePreview();
@@ -622,7 +622,7 @@ function buildRelatedGuidePreview(
     related_guide_title: selectedSnippet.sectionTitle || "관련 기준 가이드",
     related_guide_excerpt: buildFocusedGuideExcerpt(selectedSnippet, message, answerParts, paymentIncident),
     related_guide_reason: paymentIncident
-      ? "결제 기본 설정과 에이전트/옵션값이 배포 기준과 다른지 비교할 때 참고합니다."
+      ? "결제 기본 설정과 에이전트/옵션값이 납품 시 기준과 다른지 비교할 때 참고합니다."
       : "답변에서 언급한 기본 설정 기준을 확인할 때 참고합니다.",
   };
 }
@@ -694,12 +694,12 @@ function inferBaselinePriorityItem(message: string, guideSnippets: RetrievedGuid
 
 function buildBaselinePriorityCheck(message: string, guideSnippets: RetrievedGuideSnippet[]) {
   const priorityItem = inferBaselinePriorityItem(message, guideSnippets);
-  return `배포 기본 세팅 기준으로 보면 ${priorityItem} 항목을 우선 확인해야 합니다.`;
+  return `납품 시 기본 세팅 기준으로 보면 ${priorityItem} 항목을 우선 확인해야 합니다.`;
 }
 
 function ensureBaselineFirstChecks(checks: string[], message: string, guideSnippets: RetrievedGuideSnippet[]) {
   const baselinePriorityCheck = buildBaselinePriorityCheck(message, guideSnippets);
-  const remainingChecks = checks.filter((item) => !normalizeBulletText(item).startsWith("배포 기본 세팅 기준으로 보면"));
+  const remainingChecks = checks.filter((item) => !normalizeBulletText(item).startsWith("납품 시 기본 세팅 기준으로 보면"));
   return compactList([baselinePriorityCheck, ...remainingChecks], 6);
 }
 
@@ -924,10 +924,10 @@ export async function analyzeSupportIssue(message: string, topK?: number): Promi
         "질문 맥락을 먼저 파악해 장애 대응 질문인지, 단순 기능/설정 안내 질문인지 구분하라.",
         "검색된 사례와 가이드는 참고자료이지 절대적인 정답이 아니다.",
         "키오스크 메인 기준 가이드(Baseline)는 우선 확인사항/권장 대응 방향의 기준값으로 적극 반영하라.",
-        "incident 모드에서는 과거 지원내역보다 먼저 현재 현장이 배포 기본 세팅에서 이탈했는지 확인하라.",
+        "incident 모드에서는 과거 지원내역보다 먼저 현재 현장이 납품 시 기본 세팅에서 이탈했는지 확인하라.",
         "incident 모드에서는 유사 사례를 바로 답으로 삼지 말고, 기본 설정 이탈 여부를 먼저 점검한 뒤 보조 근거로 활용하라.",
         "모드가 incident(장애/오류)라면 현재 문제상황과 가장 가까운 패턴을 찾아 의심 원인, 우선 확인사항, 권장 대응 방향을 정리하라.",
-        "incident 모드에서는 checks의 첫 번째 항목을 반드시 `배포 기본 세팅 기준으로 보면 ... 항목을 우선 확인해야 합니다.` 형식으로 작성하라.",
+        "incident 모드에서는 checks의 첫 번째 항목을 반드시 `납품 시 기본 세팅 기준으로 보면 ... 항목을 우선 확인해야 합니다.` 형식으로 작성하며, baseline 가이드 관련 내용을 검색하여 답변에 참고하라.",
         "모드가 guide(설정/기능 질문)라면 원인 추정을 억지로 만들지 말고 baseline 가이드 기준의 절차/설정 포인트를 중심으로 작성하라.",
         "guide 모드일 때는 guide_overview(핵심 요약)와 guide_steps(실행 순서)를 채워라.",
         "incident 모드일 때도 guide_overview는 빈 문자열(\"\"), guide_steps는 빈 배열([])로 반드시 채워라.",
@@ -953,7 +953,7 @@ export async function analyzeSupportIssue(message: string, topK?: number): Promi
         `검색된 키오스크 기준 가이드:\n${formatRetrievedGuideSnippets(guideContext)}`,
         "",
         `검색 신뢰도 등급: ${confidenceLevel}`,
-        "과거 지원내역보다 먼저 기본 설정 이탈 여부를 확인하는 흐름으로 답변하라.",
+        "과거 지원내역보다 먼저 기본 설정에서 벗어났는지 여부를 확인하는 흐름으로 답변하라.",
         "guide 모드에서는 장애 원인 단정 표현을 피하고, 기준 절차/설정 포인트를 명확하게 안내하라.",
         "incident 모드에서는 증상과 근거를 연결해 원인 가설과 확인 포인트를 우선 제시하라.",
         "guide_overview에는 한눈에 이해되는 핵심 가이드 요약을 2~4문장으로 작성하라.",
@@ -963,7 +963,7 @@ export async function analyzeSupportIssue(message: string, topK?: number): Promi
         "출력에는 사례/가이드를 그대로 복붙하지 말고, 현재 문의 맥락에 맞는 실무형 답변만 담아라.",
         ...(paymentIncident
           ? [
-              "이 문의는 결제/카드 실패 incident로 보고 현금 결제 대체안, 카드리더기 단독 재부팅, 외부 VAN/카드사 망 추측을 배제하라.",
+              "이 문의는 결제/카드 실패 incident로 보고 현금 결제 대체안, 외부 VAN/카드사 망 추측을 배제하라.",
               "상담사가 통화 중 원격지원으로 바로 확인할 수 있는 항목을 우선 제시하고, 현장 조작 요청은 최소화하라.",
             ]
           : []),
