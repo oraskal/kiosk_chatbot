@@ -5,7 +5,16 @@ import { z } from "zod";
 
 import { getRequiredServerConfig } from "@/lib/config";
 import { getSupabaseVectorStore } from "@/lib/rag/vector-store";
-import type { BaselineReference, ChatApiResponse, ConfidenceLevel, QueryMode, SimilarCaseSummary } from "@/lib/types";
+import type {
+  AnswerSectionGroup,
+  BaselineReference,
+  ChatApiResponse,
+  ConfidenceLevel,
+  ListStyle,
+  QueryMode,
+  SimilarCaseSummary,
+  StructuredAnswerSections,
+} from "@/lib/types";
 
 const QUERY_MODE_VALUES = ["incident", "guide"] as const;
 const DOMAIN_VALUES = ["payment", "printer", "scanner", "launcher", "login", "network", "display", "etc"] as const;
@@ -165,13 +174,6 @@ const compositionSchema = z.object({
   actions: z.array(z.string()).min(1).max(6),
 });
 
-const PROVENANCE_LABEL: Record<EvidenceProvenance, string> = {
-  baseline_doc: "[기준 문서]",
-  process_doc: "[운영 절차]",
-  case_history: "[유사 사례]",
-  inferred: "[추정 보완]",
-};
-
 const PROVENANCE_PRIORITY: Record<EvidenceProvenance, number> = {
   baseline_doc: 0,
   process_doc: 1,
@@ -286,8 +288,104 @@ function uniqueStrings(items: string[], maxItems: number) {
   return output;
 }
 
-function withProvenanceLabel(text: string, provenance: EvidenceProvenance) {
-  return `${PROVENANCE_LABEL[provenance]} ${normalizeSpace(text)}`;
+function formatCandidateForOutput(candidate: SectionCandidate, section: IncidentSectionKey) {
+  const text = normalizeSpace(candidate.text);
+
+  if (!text) {
+    return "";
+  }
+
+  if (section === "suspected_causes") {
+    if (candidate.provenance === "case_history" && !/\(유사 사례 기반\)$/.test(text)) {
+      return `${text} (유사 사례 기반)`;
+    }
+
+    if (candidate.provenance === "inferred" && !/\(추정 보완\)$/.test(text)) {
+      return `${text} (추정 보완)`;
+    }
+  }
+
+  return text;
+}
+
+function flattenGroupItems(groups: AnswerSectionGroup[], section: IncidentSectionKey) {
+  return uniqueStrings(
+    groups.flatMap((group) => group.items),
+    SECTION_LIMITS[section],
+  );
+}
+
+function buildGroup(title: string | undefined, listStyle: ListStyle, items: string[]): AnswerSectionGroup | null {
+  const cleanedItems = uniqueStrings(items, items.length);
+
+  if (cleanedItems.length === 0) {
+    return null;
+  }
+
+  return {
+    title,
+    list_style: listStyle,
+    items: cleanedItems,
+  };
+}
+
+function isAnswerSectionGroup(group: AnswerSectionGroup | null): group is AnswerSectionGroup {
+  return group !== null;
+}
+
+function buildIncidentSectionGroups(signature: SymptomSignature, draft: IncidentDraft): StructuredAnswerSections {
+  const suspectedCauseGroup = buildGroup(
+    undefined,
+    "bullet",
+    draft.suspectedCauses.map((item) => formatCandidateForOutput(item, "suspected_causes")),
+  );
+  const baselineCheckGroup = buildGroup(
+    "설치가이드 기준",
+    "bullet",
+    draft.checks
+      .filter((item) => item.provenance === "baseline_doc")
+      .map((item) => formatCandidateForOutput(item, "checks")),
+  );
+  const processCheckGroup = buildGroup(
+    "운영 절차 기준",
+    signature.intent === "official_process" ? "ordered" : "bullet",
+    draft.checks
+      .filter((item) => item.provenance === "process_doc")
+      .map((item) => formatCandidateForOutput(item, "checks")),
+  );
+  const caseCheckGroup = buildGroup(
+    "추가로 볼 사항(유사 사례)",
+    "bullet",
+    draft.checks
+      .filter((item) => item.provenance === "case_history")
+      .map((item) => formatCandidateForOutput(item, "checks")),
+  );
+  const inferredCheckGroup = buildGroup(
+    "추가 확인",
+    "bullet",
+    draft.checks
+      .filter((item) => item.provenance === "inferred")
+      .map((item) => formatCandidateForOutput(item, "checks")),
+  );
+  const actionGroup = buildGroup(
+    undefined,
+    signature.intent === "official_process" ? "ordered" : "bullet",
+    draft.actions.map((item) => formatCandidateForOutput(item, "actions")),
+  );
+  const orderedCheckGroups =
+    signature.intent === "official_process"
+      ? [processCheckGroup, baselineCheckGroup, caseCheckGroup, inferredCheckGroup]
+      : [baselineCheckGroup, processCheckGroup, caseCheckGroup, inferredCheckGroup];
+
+  return {
+    suspected_causes: suspectedCauseGroup ? [suspectedCauseGroup] : [],
+    checks: orderedCheckGroups.filter(isAnswerSectionGroup),
+    actions: actionGroup ? [actionGroup] : [],
+  };
+}
+
+function withProvenanceLabel(text: string, _provenance?: EvidenceProvenance) {
+  return normalizeSpace(text);
 }
 
 function determineConfidenceLevel(score: number | null, highThreshold: number, lowThreshold: number): ConfidenceLevel {
@@ -1807,13 +1905,53 @@ function buildCompositionPrompt(signature: SymptomSignature, draft: IncidentDraf
   ];
 }
 
+function buildCompositionPromptV2(signature: SymptomSignature, draft: IncidentDraft) {
+  const serializeSection = (items: SectionCandidate[]) =>
+    items.map((item, index) => `${index + 1}. (${item.provenance}) ${item.text}`).join("\n");
+
+  return [
+    new SystemMessage(
+      [
+        "당신은 grounded answer composer다.",
+        "아래 relevance gate를 통과한 후보만 사용한다.",
+        "사실을 추가하지 말고, 후보 의미를 유지한 채 문장을 더 읽기 쉽게 다듬는다.",
+        "baseline_doc과 process_doc를 case_history보다 우선한다. case_history는 보조 참고로만 유지한다.",
+        "출력 문장 앞에 [기준 문서], [유사 사례], [운영 절차] 같은 접두 라벨을 붙이지 않는다.",
+        "suspected_causes는 원인 추정만 짧게 적고, 점검 절차나 메뉴 경로를 길게 넣지 않는다.",
+        "checks는 상담사가 바로 확인할 체크포인트처럼 쓰고, 설정 기준이 있으면 자연스럽게 드러나게 쓴다.",
+        "actions는 실제 대응 권장안처럼 쓰고, 앞 문장을 그대로 반복하지 않는다.",
+        "번호, 불릿 기호, 소제목을 문장 자체에 직접 쓰지 않는다.",
+      ].join("\n"),
+    ),
+    new HumanMessage(
+      [
+        `query_mode=${signature.queryMode}`,
+        `domain=${signature.domain}`,
+        `object=${signature.object}`,
+        `stage=${signature.stage}`,
+        `polarity=${signature.polarity}`,
+        `intent=${signature.intent}`,
+        "",
+        "[suspected_causes]",
+        serializeSection(draft.suspectedCauses),
+        "",
+        "[checks]",
+        serializeSection(draft.checks),
+        "",
+        "[actions]",
+        serializeSection(draft.actions),
+      ].join("\n"),
+    ),
+  ];
+}
+
 async function composeIncidentDraft(signature: SymptomSignature, draft: IncidentDraft) {
   try {
     const model = createChatModel().withStructuredOutput(compositionSchema, {
       name: "support_answer_composition",
       strict: true,
     });
-    const response = await model.invoke(buildCompositionPrompt(signature, draft));
+    const response = await model.invoke(buildCompositionPromptV2(signature, draft));
 
     if (
       response.suspected_causes.length === draft.suspectedCauses.length &&
@@ -1843,6 +1981,73 @@ async function composeIncidentDraft(signature: SymptomSignature, draft: Incident
   return draft;
 }
 
+function pickGuideExcerptLines(message: string, evidence: RetrievedEvidence, maxItems = 5) {
+  const lines = extractEvidenceLines(evidence)
+    .filter((line) => line.length >= 4)
+    .map((line, index) => ({
+      index,
+      text: line,
+      features: classifyLineFeatures(line),
+      score: scoreEvidenceLine(message, evidence, line),
+    }));
+
+  if (lines.length === 0) {
+    return [];
+  }
+
+  const selected = new Set<number>();
+  const locationLine = lines.find((item) => /^설정 위치[:：]/.test(item.text));
+
+  if (locationLine) {
+    selected.add(locationLine.index);
+  }
+
+  const preferredFeatures: LineFeature[] = ["menu_path", "config_step", "test_step", "install_step"];
+
+  for (const feature of preferredFeatures) {
+    const candidate = [...lines]
+      .filter((item) => item.features.includes(feature))
+      .sort((left, right) => right.score - left.score)[0];
+
+    if (candidate) {
+      selected.add(candidate.index);
+    }
+
+    if (selected.size >= maxItems) {
+      break;
+    }
+  }
+
+  for (const item of [...lines].sort((left, right) => right.score - left.score)) {
+    selected.add(item.index);
+
+    if (selected.size >= maxItems) {
+      break;
+    }
+  }
+
+  return lines
+    .filter((item) => selected.has(item.index))
+    .sort((left, right) => left.index - right.index)
+    .slice(0, maxItems)
+    .map((item) => item.text);
+}
+
+function buildGuideExcerptMarkdown(sourceFile: string, sections: Array<{ title: string; lines: string[] }>) {
+  if (sections.length === 0) {
+    return "";
+  }
+
+  const blocks = sections.map(({ title, lines }) =>
+    [
+      `> **${title}**`,
+      ...lines.map((line) => `> - ${normalizeLine(line)}`),
+    ].join("\n"),
+  );
+
+  return [`\`${sourceFile}\``, "", ...blocks].join("\n\n").trim();
+}
+
 function buildBaselineReference(message: string, bundle: GroundedEvidenceBundle, draft?: IncidentDraft): BaselineReference | null {
   const docs = bundle.baselineDocs.length > 0 ? bundle.baselineDocs.slice(0, 4) : bundle.processDocs.slice(0, 3);
 
@@ -1850,100 +2055,59 @@ function buildBaselineReference(message: string, bundle: GroundedEvidenceBundle,
     return null;
   }
 
-  const referencedEvidenceIds = new Set(
-    [draft?.checks ?? [], draft?.actions ?? [], draft?.suspectedCauses ?? []]
-      .flat()
-      .map((item) => item.evidenceId)
-      .filter((item): item is string => Boolean(item)),
+  const referenceCounts = new Map<string, number>();
+
+  for (const evidenceId of [draft?.checks ?? [], draft?.actions ?? [], draft?.suspectedCauses ?? []]
+    .flat()
+    .map((item) => item.evidenceId)
+    .filter((item): item is string => Boolean(item))) {
+    referenceCounts.set(evidenceId, (referenceCounts.get(evidenceId) ?? 0) + 1);
+  }
+
+  const excerptDocs = [...docs]
+    .sort((left, right) => {
+      const rightScore =
+        (referenceCounts.get(right.id) ?? 0) * 20 +
+        right.alignmentScore +
+        right.similarity +
+        (right.provenance === "baseline_doc" ? 6 : 0);
+      const leftScore =
+        (referenceCounts.get(left.id) ?? 0) * 20 +
+        left.alignmentScore +
+        left.similarity +
+        (left.provenance === "baseline_doc" ? 6 : 0);
+
+      return rightScore - leftScore;
+    })
+    .slice(0, 2);
+
+  const excerptSections = excerptDocs
+    .map((item) => ({
+      title: item.title,
+      lines: pickGuideExcerptLines(message, item),
+    }))
+    .filter((item) => item.lines.length > 0);
+  const sourceFile = uniqueStrings(excerptDocs.map((item) => item.sourceFile), 1)[0] ?? docs[0]?.sourceFile ?? "kiosk_baseline_guide.md";
+  const excerpts = uniqueStrings(
+    excerptSections.flatMap((item) => item.lines),
+    6,
   );
-
-  const scoredLines = docs.flatMap((item) =>
-    extractEvidenceLines(item)
-      .filter((line) => line.length >= 4)
-      .map((line) => {
-        const features = classifyLineFeatures(line);
-        const featureSet = new Set(features);
-        const featureBoost =
-          (featureSet.has("menu_path") ? 10 : 0) +
-          (featureSet.has("test_step") ? 12 : 0) +
-          (featureSet.has("config_step") ? 12 : 0) +
-          (featureSet.has("install_step") ? 10 : 0) +
-          (featureSet.has("guide_hint") ? 6 : 0);
-
-        return {
-          text: line,
-          evidenceId: item.id,
-          score:
-            scoreEvidenceLine(message, item, line) +
-            featureBoost +
-            (referencedEvidenceIds.has(item.id) ? 12 : 0) +
-            (item.provenance === "baseline_doc" ? 8 : 0),
-          features,
-        };
-      }),
-  );
-
-  scoredLines.sort((left, right) => right.score - left.score);
-
-  const selected: typeof scoredLines = [];
-  const seenText = new Set<string>();
-  const coveredFeatures = new Set<LineFeature>();
-  const featureOrder: LineFeature[] = ["menu_path", "test_step", "config_step", "install_step", "guide_hint"];
-
-  for (const feature of featureOrder) {
-    const candidate = scoredLines.find((item) => item.features.includes(feature) && !seenText.has(toComparableText(item.text)));
-
-    if (!candidate) {
-      continue;
-    }
-
-    selected.push(candidate);
-    seenText.add(toComparableText(candidate.text));
-    candidate.features.forEach((item) => coveredFeatures.add(item));
-
-    if (selected.length >= 6) {
-      break;
-    }
-  }
-
-  for (const item of scoredLines) {
-    const key = toComparableText(item.text);
-
-    if (seenText.has(key)) {
-      continue;
-    }
-
-    selected.push(item);
-    seenText.add(key);
-    item.features.forEach((feature) => coveredFeatures.add(feature));
-
-    if (selected.length >= 6) {
-      break;
-    }
-  }
-
-  if (!selected.some((item) => item.features.includes("test_step"))) {
-    const bestTestLine = scoredLines.find((item) => item.features.includes("test_step"));
-
-    if (bestTestLine && !seenText.has(toComparableText(bestTestLine.text))) {
-      selected.unshift(bestTestLine);
-      seenText.add(toComparableText(bestTestLine.text));
-    }
-  }
 
   return {
-    source_titles: uniqueStrings(docs.map((item) => item.title), 3),
-    source_files: uniqueStrings(docs.map((item) => item.sourceFile), 2),
-    excerpts: selected.slice(0, 6).map((item) => item.text),
+    source_titles: uniqueStrings(excerptDocs.map((item) => item.title), 3),
+    source_files: uniqueStrings(excerptDocs.map((item) => item.sourceFile), 2),
+    excerpts,
+    section_title: excerptDocs[0]?.title,
+    markdown_excerpt: buildGuideExcerptMarkdown(sourceFile, excerptSections),
   };
 }
 
-function buildGuideResponse(
+function buildGuideResponseLegacy(
   signature: SymptomSignature,
   bundle: GroundedEvidenceBundle,
   highThreshold: number,
   lowThreshold: number,
-): ChatApiResponse {
+): any {
   const docs = signature.intent === "official_process" ? [...bundle.processDocs, ...bundle.baselineDocs] : [...bundle.baselineDocs, ...bundle.processDocs];
   const topSimilarity = docs[0]?.similarity ?? null;
   const confidenceLevel = determineConfidenceLevel(topSimilarity, highThreshold, lowThreshold);
@@ -1990,13 +2154,13 @@ function buildGuideResponse(
   };
 }
 
-function finalizeIncidentResponse(
+function finalizeIncidentResponseLegacy(
   draft: IncidentDraft,
   signature: SymptomSignature,
   bundle: GroundedEvidenceBundle,
   highThreshold: number,
   lowThreshold: number,
-): ChatApiResponse {
+): any {
   const similarCaseEvidence =
     signature.intent === "official_process"
       ? []
@@ -2023,6 +2187,127 @@ function finalizeIncidentResponse(
       draft.actions.map((item) => withProvenanceLabel(item.text, item.provenance)),
       SECTION_LIMITS.actions,
     ),
+    baseline_reference: baselineReference,
+    confidence_level: confidenceLevel,
+    confidence_note: buildConfidenceNote(
+      confidenceLevel,
+      topSimilarity,
+      bundle.baselineDocs.length,
+      bundle.processDocs.length,
+      similarCases.length,
+    ),
+    similar_case_count: similarCases.length,
+    top_similarity: topSimilarity,
+    similar_cases: similarCases,
+    fallback_used: confidenceLevel === "low" || draft.fallbackUsed,
+  };
+}
+
+function buildGuideResponseV2(
+  signature: SymptomSignature,
+  bundle: GroundedEvidenceBundle,
+  highThreshold: number,
+  lowThreshold: number,
+): ChatApiResponse {
+  const docs =
+    signature.intent === "official_process" ? [...bundle.processDocs, ...bundle.baselineDocs] : [...bundle.baselineDocs, ...bundle.processDocs];
+  const topSimilarity = docs[0]?.similarity ?? null;
+  const confidenceLevel = determineConfidenceLevel(topSimilarity, highThreshold, lowThreshold);
+  const fallbackActions = ["관련 설치가이드 근거가 부족해 메뉴 경로와 현재 설정값을 교차확인할 필요가 있습니다."];
+  const groupTitle = signature.intent === "official_process" ? "운영 절차 기준" : "설치가이드 기준";
+  const listStyle: ListStyle = signature.intent === "official_process" ? "ordered" : "bullet";
+
+  if (docs.length === 0) {
+    const sectionGroups: StructuredAnswerSections = {
+      suspected_causes: [],
+      checks: [],
+      actions: [
+        buildGroup("추가 확인", "bullet", fallbackActions) ?? {
+          title: "추가 확인",
+          list_style: "bullet",
+          items: fallbackActions,
+        },
+      ],
+    };
+
+    return {
+      query_mode: "guide",
+      suspected_causes: [],
+      checks: [],
+      actions: flattenGroupItems(sectionGroups.actions, "actions"),
+      section_groups: sectionGroups,
+      baseline_reference: null,
+      confidence_level: confidenceLevel,
+      confidence_note: buildGuideConfidenceNote(confidenceLevel, topSimilarity, 0),
+      similar_case_count: 0,
+      top_similarity: topSimilarity,
+      similar_cases: [],
+      fallback_used: true,
+    };
+  }
+
+  const actionItems = uniqueStrings(
+    buildLineCandidates(signature.symptomSummary, docs, SECTION_LIMITS.actions, 2).map((item) => normalizeSpace(item.text)),
+    SECTION_LIMITS.actions,
+  );
+  const sectionGroups: StructuredAnswerSections = {
+    suspected_causes: [],
+    checks: [],
+    actions: [
+      buildGroup(groupTitle, listStyle, actionItems.length > 0 ? actionItems : fallbackActions) ?? {
+        title: groupTitle,
+        list_style: listStyle,
+        items: actionItems.length > 0 ? actionItems : fallbackActions,
+      },
+    ],
+  };
+
+  return {
+    query_mode: "guide",
+    suspected_causes: [],
+    checks: [],
+    actions: flattenGroupItems(sectionGroups.actions, "actions"),
+    section_groups: sectionGroups,
+    baseline_reference: buildBaselineReference(signature.symptomSummary, {
+      ...bundle,
+      baselineDocs: docs,
+      processDocs: [],
+    }),
+    confidence_level: confidenceLevel,
+    confidence_note: buildGuideConfidenceNote(confidenceLevel, topSimilarity, docs.length),
+    similar_case_count: 0,
+    top_similarity: topSimilarity,
+    similar_cases: [],
+    fallback_used: false,
+  };
+}
+
+function finalizeIncidentResponseV2(
+  draft: IncidentDraft,
+  signature: SymptomSignature,
+  bundle: GroundedEvidenceBundle,
+  highThreshold: number,
+  lowThreshold: number,
+): ChatApiResponse {
+  const similarCaseEvidence =
+    signature.intent === "official_process"
+      ? []
+      : bundle.caseHistories.filter(
+          (item) => !item.exclusionReason && item.signature.stage === signature.stage && item.signature.polarity === signature.polarity,
+        );
+  const similarCases = similarCaseEvidence.slice(0, 3).flatMap((item) => (item.summary ? [item.summary] : []));
+  const topSimilarity =
+    bundle.baselineDocs[0]?.similarity ?? bundle.processDocs[0]?.similarity ?? similarCaseEvidence[0]?.similarity ?? null;
+  const confidenceLevel = determineConfidenceLevel(topSimilarity, highThreshold, lowThreshold);
+  const baselineReference = buildBaselineReference(signature.symptomSummary, bundle, draft);
+  const sectionGroups = buildIncidentSectionGroups(signature, draft);
+
+  return {
+    query_mode: "incident",
+    suspected_causes: flattenGroupItems(sectionGroups.suspected_causes, "suspected_causes"),
+    checks: flattenGroupItems(sectionGroups.checks, "checks"),
+    actions: flattenGroupItems(sectionGroups.actions, "actions"),
+    section_groups: sectionGroups,
     baseline_reference: baselineReference,
     confidence_level: confidenceLevel,
     confidence_note: buildConfidenceNote(
@@ -2074,7 +2359,7 @@ function runDeterministicIncidentPipeline(
   );
   const grounded = buildDeterministicGrounding(message, signature, evidence);
   const draft = buildIncidentDraft(message, signature, grounded);
-  const response = finalizeIncidentResponse(draft, signature, grounded, thresholds.high, thresholds.low);
+  const response = finalizeIncidentResponseV2(draft, signature, grounded, thresholds.high, thresholds.low);
 
   return {
     signature,
@@ -2095,13 +2380,13 @@ export async function analyzeSupportIssue(message: string, topK?: number): Promi
   const grounded = await groundEvidence(message, signature, evidence);
 
   if (signature.queryMode === "guide") {
-    return buildGuideResponse(signature, grounded, config.HIGH_CONFIDENCE_THRESHOLD, config.LOW_CONFIDENCE_THRESHOLD);
+    return buildGuideResponseV2(signature, grounded, config.HIGH_CONFIDENCE_THRESHOLD, config.LOW_CONFIDENCE_THRESHOLD);
   }
 
   const draft = buildIncidentDraft(message, signature, grounded);
   const composed = await composeIncidentDraft(signature, draft);
 
-  return finalizeIncidentResponse(
+  return finalizeIncidentResponseV2(
     composed,
     signature,
     grounded,
@@ -2117,6 +2402,6 @@ export const __testing = {
   buildIncidentDraft,
   buildDeterministicGrounding,
   runDeterministicIncidentPipeline,
-  buildGuideResponse,
-  finalizeIncidentResponse,
+  buildGuideResponse: buildGuideResponseV2,
+  finalizeIncidentResponse: finalizeIncidentResponseV2,
 };

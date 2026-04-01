@@ -35,10 +35,26 @@ export interface SimilarCaseSummary {
   similarity_score: number;
 }
 
+export type ListStyle = "bullet" | "ordered";
+
+export interface AnswerSectionGroup {
+  title?: string;
+  list_style: ListStyle;
+  items: string[];
+}
+
+export interface StructuredAnswerSections {
+  suspected_causes: AnswerSectionGroup[];
+  checks: AnswerSectionGroup[];
+  actions: AnswerSectionGroup[];
+}
+
 export interface BaselineReference {
   source_titles: string[];
   source_files: string[];
   excerpts: string[];
+  section_title?: string;
+  markdown_excerpt?: string;
 }
 
 export interface ChatApiResponse {
@@ -46,6 +62,7 @@ export interface ChatApiResponse {
   suspected_causes: string[];
   checks: string[];
   actions: string[];
+  section_groups: StructuredAnswerSections;
   baseline_reference?: BaselineReference | null;
   confidence_level: ConfidenceLevel;
   confidence_note: string;

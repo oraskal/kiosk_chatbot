@@ -250,6 +250,22 @@ a {
   margin-top: 8px;
 }
 
+.section-groups {
+  display: grid;
+  gap: 14px;
+}
+
+.section-group + .section-group {
+  padding-top: 2px;
+}
+
+.section-group-title {
+  margin: 0 0 8px;
+  color: var(--accent-strong);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
 .baseline-meta {
   margin-bottom: 12px;
   color: var(--text-muted);
