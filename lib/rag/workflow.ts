@@ -4,7 +4,15 @@ import { ChatOpenAI } from "@langchain/openai";
 import { z } from "zod";
 
 import { getRequiredServerConfig } from "@/lib/config";
+import {
+  buildRoutingProfile,
+  classifyGuideKind,
+  cleanTextArtifacts,
+  extractSignalPhrases,
+  normalizeSymptomSignatureFallback as deriveSymptomSignature,
+} from "@/lib/rag/policy";
 import { getSupabaseVectorStore } from "@/lib/rag/vector-store";
+import type { GuideKind, RoutingProfile } from "@/lib/rag/policy";
 import type {
   AnswerSectionGroup,
   BaselineReference,
@@ -89,6 +97,7 @@ type RetrievedEvidence = {
   retrievalChannels: RetrievalChannel[];
   sourceType: "case" | "guide";
   provenance: EvidenceProvenance;
+  guideKind?: GuideKind;
   title: string;
   content: string;
   sourceFile: string;
@@ -98,6 +107,8 @@ type RetrievedEvidence = {
   latestActionReference?: string;
   qualityTier?: string;
   alignmentScore: number;
+  lexicalScore: number;
+  phraseMatches: number;
   exclusionReason?: string;
 };
 
@@ -316,6 +327,7 @@ function isAnswerSectionGroup(group: AnswerSectionGroup | null): group is Answer
 }
 
 function buildIncidentSectionGroups(signature: SymptomSignature, draft: IncidentDraft): StructuredAnswerSections {
+  const profile = buildRoutingProfile(signature.symptomSummary, signature);
   const suspectedCauseGroup = buildGroup(
     undefined,
     "bullet",
@@ -357,7 +369,9 @@ function buildIncidentSectionGroups(signature: SymptomSignature, draft: Incident
   const orderedCheckGroups =
     signature.intent === "official_process"
       ? [processCheckGroup, baselineCheckGroup, caseCheckGroup, inferredCheckGroup]
-      : [baselineCheckGroup, processCheckGroup, caseCheckGroup, inferredCheckGroup];
+      : profile.preferCaseCauses
+        ? [caseCheckGroup, baselineCheckGroup, processCheckGroup, inferredCheckGroup]
+        : [baselineCheckGroup, caseCheckGroup, processCheckGroup, inferredCheckGroup];
 
   return {
     suspected_causes: suspectedCauseGroup ? [suspectedCauseGroup] : [],
@@ -681,25 +695,7 @@ function inferIntent(message: string, queryMode: QueryMode, stage: Stage, polari
 }
 
 function normalizeSymptomSignatureFallback(message: string): SymptomSignature {
-  const queryMode = inferQueryModeFallback(message);
-  const text = normalizeSpace(message);
-  const domain = inferDomain(text);
-  const object = inferObject(text, domain);
-  const stage = inferStage(text, domain);
-  const polarity = inferPolarity(text, domain, stage);
-  const scope = inferScope(text);
-  const intent = inferIntent(text, queryMode, stage, polarity);
-
-  return {
-    queryMode,
-    domain,
-    object,
-    stage,
-    polarity,
-    intent,
-    scope,
-    symptomSummary: text.slice(0, 120),
-  };
+  return deriveSymptomSignature(message);
 }
 
 function buildInterpretationPrompt(message: string) {
@@ -849,14 +845,16 @@ function intentQueryTerms(intent: Intent) {
 }
 
 function buildRetrievalQueries(message: string, signature: SymptomSignature) {
+  const cleanedMessage = cleanTextArtifacts(message);
   const domainTerms = domainQueryTerms(signature.domain);
   const objectTerms = objectQueryTerms(signature.object);
   const stageTerms = stageQueryTerms(signature.stage);
   const polarityTerms = polarityQueryTerms(signature.polarity);
   const intentTerms = intentQueryTerms(signature.intent);
+  const signalPhrases = extractSignalPhrases(cleanedMessage, 4);
   const core = uniqueStrings(
     [
-      normalizeSpace(message),
+      normalizeSpace(cleanedMessage),
       normalizeSpace([domainTerms, objectTerms, stageTerms, polarityTerms, intentTerms].filter(Boolean).join(" ")),
     ],
     2,
@@ -886,33 +884,61 @@ function buildRetrievalQueries(message: string, signature: SymptomSignature) {
     2,
   );
 
+  const boostedBaselineQueries = uniqueStrings(
+    [
+      ...baselineQueries,
+      normalizeSpace(`${domainTerms} ${objectTerms} ${stageTerms} baseline check`),
+      ...signalPhrases.slice(0, 2).map((phrase) => normalizeSpace(`${domainTerms} ${objectTerms} ${phrase}`)),
+    ],
+    4,
+  );
+  const boostedProcessQueries = uniqueStrings(
+    [
+      normalizeSpace(`${cleanedMessage} official process`),
+      normalizeSpace(`${domainTerms} ${objectTerms} ${stageTerms} ${intentTerms} procedure`),
+      ...processQueries,
+    ],
+    3,
+  );
+  const boostedCaseQueries = uniqueStrings(
+    [
+      normalizeSpace(`${cleanedMessage} similar case`),
+      normalizeSpace(`${domainTerms} ${objectTerms} ${stageTerms} ${polarityTerms} case history`),
+      ...signalPhrases.map((phrase) => normalizeSpace(`${phrase} similar case`)),
+      ...caseQueries,
+    ],
+    4,
+  );
+
   return {
-    baselineQueries,
-    processQueries,
-    caseQueries,
+    baselineQueries: boostedBaselineQueries,
+    processQueries: boostedProcessQueries,
+    caseQueries: boostedCaseQueries,
   };
 }
 
 async function retrieveEvidence(message: string, signature: SymptomSignature, searchTopK: number) {
   const vectorStore = getSupabaseVectorStore();
   const queries = buildRetrievalQueries(message, signature);
-  const requests: Array<{ query: string; channel: RetrievalChannel }> = [];
+  const requests: Array<{ query: string; channel: RetrievalChannel; filter?: Record<string, unknown> }> = [];
 
   for (const query of queries.baselineQueries) {
-    requests.push({ query, channel: "baseline" });
+    requests.push({ query, channel: "baseline", filter: { source_type: "baseline_guide" } });
+    requests.push({ query, channel: "baseline", filter: { source_type: "official_guide" } });
   }
   for (const query of queries.processQueries) {
-    requests.push({ query, channel: "process" });
+    requests.push({ query, channel: "process", filter: { source_type: "baseline_guide" } });
+    requests.push({ query, channel: "process", filter: { source_type: "official_guide" } });
   }
   if (signature.queryMode === "incident") {
     for (const query of queries.caseQueries) {
-      requests.push({ query, channel: "case" });
+      requests.push({ query, channel: "case", filter: { source_type: "support_case" } });
     }
   }
 
   const results = await Promise.all(
-    requests.map(async ({ query, channel }) => {
-      const items = await vectorStore.similaritySearchWithScore(query, searchTopK);
+    requests.map(async ({ query, channel, filter }) => {
+      const items = await vectorStore.similaritySearchWithScore(query, searchTopK, filter);
       return items.map(
         ([document, similarity]) =>
           ({
@@ -953,6 +979,12 @@ function classifyGuideProvenance(title: string, content: string, retrievalChanne
 
   if (explicit === "process_doc" || explicit === "baseline_doc") {
     return explicit;
+  }
+
+  const guideKind = classifyGuideKind(title, content);
+
+  if (guideKind === "process_doc") {
+    return "process_doc";
   }
 
   const haystack = `${title}\n${content}`;
@@ -1072,14 +1104,17 @@ function classifyRetrievedEvidence(candidates: RetrievalCandidate[]): RetrievedE
       const signature =
         readMetadataSignature(metadata) ??
         normalizeSymptomSignatureFallback(
-        [
-          summary.problem_summary,
-          summary.root_cause,
-          summary.resolution_action,
-          summary.issue_subtype_label,
-        ]
-          .filter(Boolean)
-          .join(" "),
+          [
+            summary.problem_summary,
+            summary.root_cause,
+            summary.resolution_action,
+            summary.issue_subtype_label,
+            String(metadata.customer_reply_reference ?? ""),
+            String(metadata.latest_action_reference ?? ""),
+            String(metadata.symptom_keywords ?? ""),
+          ]
+            .filter(Boolean)
+            .join(" "),
         );
 
       return {
@@ -1097,11 +1132,21 @@ function classifyRetrievedEvidence(candidates: RetrievalCandidate[]): RetrievedE
         latestActionReference: String(metadata.latest_action_reference ?? ""),
         qualityTier: String(metadata.quality_tier ?? ""),
         alignmentScore: 0,
+        lexicalScore: 0,
+        phraseMatches: 0,
       } satisfies RetrievedEvidence;
     }
 
     const title = String(metadata.guide_section_title ?? "");
     const content = getGuideBody(document.pageContent);
+    const guideKind =
+      String(metadata.guide_kind ?? "") === "baseline_doc" ||
+      String(metadata.guide_kind ?? "") === "process_doc" ||
+      String(metadata.guide_kind ?? "") === "install_doc" ||
+      String(metadata.guide_kind ?? "") === "reference_doc" ||
+      String(metadata.guide_kind ?? "") === "meta_doc"
+        ? (String(metadata.guide_kind) as GuideKind)
+        : classifyGuideKind(title, content);
     const provenance = classifyGuideProvenance(title, content, retrievalChannels, metadata);
     const signature = readMetadataSignature(metadata) ?? normalizeSymptomSignatureFallback(`${title}\n${content}`);
 
@@ -1111,11 +1156,14 @@ function classifyRetrievedEvidence(candidates: RetrievalCandidate[]): RetrievedE
       retrievalChannels,
       sourceType: "guide",
       provenance,
+      guideKind,
       title,
       content,
       sourceFile: String(metadata.source_file ?? ""),
       signature,
       alignmentScore: 0,
+      lexicalScore: 0,
+      phraseMatches: 0,
     } satisfies RetrievedEvidence;
   });
 }
@@ -1269,7 +1317,92 @@ function computePolarityAlignmentBonus(query: SymptomSignature, evidence: Retrie
   return -10;
 }
 
-function computeAlignmentScore(message: string, query: SymptomSignature, evidence: RetrievedEvidence) {
+function countPhraseMatches(signalPhrases: string[], evidenceText: string) {
+  const haystack = toComparableText(cleanTextArtifacts(evidenceText));
+
+  return signalPhrases.reduce((count, phrase) => {
+    const needle = toComparableText(cleanTextArtifacts(phrase));
+    return needle && haystack.includes(needle) ? count + 1 : count;
+  }, 0);
+}
+
+function isConfigurationOnlyGuideEvidence(evidence: RetrievedEvidence) {
+  if (evidence.sourceType !== "guide") {
+    return false;
+  }
+
+  const haystack = cleanTextArtifacts(`${evidence.title}\n${evidence.content}`);
+  const configSignals = countMatches(haystack, [
+    /설정/i,
+    /경로/i,
+    /메뉴/i,
+    /값/i,
+    /on\/off/i,
+    /포트/i,
+    /ip/i,
+    /setting/i,
+    /menu/i,
+    /path/i,
+    /select/i,
+    /assigned/i,
+    /type/i,
+  ]);
+  const troubleshootingSignals = countMatches(haystack, [
+    /테스트/i,
+    /체크/i,
+    /확인/i,
+    /오류/i,
+    /고장/i,
+    /원인/i,
+    /정상/i,
+    /test/i,
+    /check/i,
+    /error/i,
+    /fault/i,
+    /cause/i,
+    /inspect/i,
+  ]);
+
+  return configSignals > 0 && troubleshootingSignals === 0;
+}
+
+function computeGuideKindAdjustment(profile: RoutingProfile, evidence: RetrievedEvidence) {
+  if (evidence.sourceType !== "guide") {
+    return 0;
+  }
+
+  const guideKind = evidence.guideKind ?? "baseline_doc";
+  let score = profile.guideKindWeights[guideKind];
+
+  if (profile.demoteConfigurationOnlyGuides && isConfigurationOnlyGuideEvidence(evidence)) {
+    score -= 18;
+  }
+
+  return score;
+}
+
+function computeLexicalSignalScore(message: string, evidence: RetrievedEvidence, profile: RoutingProfile) {
+  const queryTerms = extractTerms(message);
+  const evidenceTerms = extractTerms(`${evidence.title}\n${evidence.content}\n${evidence.customerReplyReference ?? ""}\n${evidence.latestActionReference ?? ""}`);
+  const overlapScore = countOverlap(queryTerms, evidenceTerms) * 2;
+  const phraseMatches = countPhraseMatches(profile.signalPhrases, `${evidence.title}\n${evidence.content}`);
+  const phraseScore = phraseMatches * (evidence.provenance === "case_history" ? 14 : 8);
+
+  return {
+    score: overlapScore + phraseScore,
+    phraseMatches,
+  };
+}
+
+function computeAlignmentScore(message: string, query: SymptomSignature, evidence: RetrievedEvidence, profile: RoutingProfile) {
+  if (evidence.sourceType === "guide" && evidence.guideKind === "meta_doc") {
+    return { included: false, score: -120, lexicalScore: 0, phraseMatches: 0, reason: "meta guide" };
+  }
+
+  if (profile.demoteConfigurationOnlyGuides && isConfigurationOnlyGuideEvidence(evidence)) {
+    return { included: false, score: -72, lexicalScore: 0, phraseMatches: 0, reason: "configuration-only guide mismatch" };
+  }
+
   if (isStrongDomainMismatch(query, evidence)) {
     return { included: false, score: -100, reason: "domain mismatch" };
   }
@@ -1287,10 +1420,9 @@ function computeAlignmentScore(message: string, query: SymptomSignature, evidenc
   }
 
   let score = evidence.similarity * 100;
-  const queryTerms = extractTerms(message);
-  const evidenceTerms = extractTerms(`${evidence.title}\n${evidence.content}`);
+  const lexical = computeLexicalSignalScore(message, evidence, profile);
 
-  score += countOverlap(queryTerms, evidenceTerms) * 2;
+  score += lexical.score;
   score += query.domain === evidence.signature.domain ? 20 : 0;
   score += query.object === evidence.signature.object ? 16 : 0;
   score += computeStageAlignmentBonus(query, evidence);
@@ -1298,11 +1430,13 @@ function computeAlignmentScore(message: string, query: SymptomSignature, evidenc
   score += evidence.retrievalChannels.includes("baseline") && evidence.provenance === "baseline_doc" ? 8 : 0;
   score += evidence.retrievalChannels.includes("process") && evidence.provenance === "process_doc" ? 8 : 0;
   score += evidence.retrievalChannels.includes("case") && evidence.provenance === "case_history" ? 8 : 0;
+  score += profile.sourceWeights[evidence.provenance === "inferred" ? "baseline_doc" : evidence.provenance];
+  score += computeGuideKindAdjustment(profile, evidence);
 
   if (query.intent === "official_process") {
     score += evidence.provenance === "process_doc" ? 24 : 0;
     score -= evidence.provenance === "case_history" ? 12 : 0;
-  } else if (query.intent === "diagnosis") {
+  } else if (query.intent === "diagnosis" && profile.archetype !== "known_case_pattern" && profile.archetype !== "physical_device") {
     score += evidence.provenance === "baseline_doc" ? 18 : 0;
     score -= evidence.provenance === "process_doc" ? 8 : 0;
   }
@@ -1317,21 +1451,26 @@ function computeAlignmentScore(message: string, query: SymptomSignature, evidenc
   }
 
   return {
-    included: score >= 35,
+    included: score >= 42,
     score,
-    reason: score >= 35 ? undefined : "low alignment",
+    phraseMatches: lexical.phraseMatches,
+    lexicalScore: lexical.score,
+    reason: score >= 42 ? undefined : "low alignment",
   };
 }
 
 function applyRelevanceGate(message: string, signature: SymptomSignature, evidenceItems: RetrievedEvidence[]) {
+  const routingProfile = buildRoutingProfile(message, signature);
   const included: RetrievedEvidence[] = [];
   const excluded: RetrievedEvidence[] = [];
 
   for (const item of evidenceItems) {
-    const alignment = computeAlignmentScore(message, signature, item);
+    const alignment = computeAlignmentScore(message, signature, item, routingProfile);
     const nextItem = {
       ...item,
       alignmentScore: alignment.score,
+      lexicalScore: alignment.lexicalScore ?? 0,
+      phraseMatches: alignment.phraseMatches ?? 0,
       exclusionReason: alignment.reason,
     };
 
@@ -1343,10 +1482,6 @@ function applyRelevanceGate(message: string, signature: SymptomSignature, eviden
   }
 
   included.sort((left, right) => {
-    if (PROVENANCE_PRIORITY[left.provenance] !== PROVENANCE_PRIORITY[right.provenance]) {
-      return PROVENANCE_PRIORITY[left.provenance] - PROVENANCE_PRIORITY[right.provenance];
-    }
-
     return right.alignmentScore - left.alignmentScore;
   });
 
@@ -1354,6 +1489,13 @@ function applyRelevanceGate(message: string, signature: SymptomSignature, eviden
 }
 
 function buildGroundingPrompt(signature: SymptomSignature, evidenceBundle: GroundedEvidenceBundle) {
+  const profile = buildRoutingProfile(signature.symptomSummary, signature);
+  const priorityText =
+    profile.archetype === "process_execution"
+      ? "process_doc > baseline_doc > case_history"
+      : profile.preferCaseCauses
+        ? "case_history > baseline_doc > process_doc"
+        : "baseline_doc > case_history > process_doc";
   const lines = [
     ...evidenceBundle.baselineDocs.map((item) => `- ${item.id} | baseline_doc | ${item.title}`),
     ...evidenceBundle.processDocs.map((item) => `- ${item.id} | process_doc | ${item.title}`),
@@ -1379,6 +1521,7 @@ function buildGroundingPrompt(signature: SymptomSignature, evidenceBundle: Groun
         `stage=${signature.stage}`,
         `polarity=${signature.polarity}`,
         `intent=${signature.intent}`,
+        `source_priority=${priorityText}`,
         "",
         "후보 evidence:",
         lines || "- 없음",
@@ -1440,6 +1583,60 @@ async function refineGroundingWithPrompt(signature: SymptomSignature, bundle: Gr
   }
 }
 
+function isStrongCaseEvidence(caseHistories: RetrievedEvidence[]) {
+  const topCase = caseHistories[0];
+
+  if (!topCase) {
+    return false;
+  }
+
+  return topCase.alignmentScore >= 96 || (topCase.alignmentScore >= 82 && topCase.phraseMatches > 0);
+}
+
+function computeEvidenceDiversity(bundle: Pick<GroundedEvidenceBundle, "baselineDocs" | "processDocs" | "caseHistories">) {
+  return [bundle.baselineDocs[0], bundle.processDocs[0], bundle.caseHistories[0]].filter(
+    (item) => Boolean(item) && (item?.alignmentScore ?? 0) >= 72,
+  ).length;
+}
+
+function shouldUseFallback(message: string, signature: SymptomSignature, bundle: GroundedEvidenceBundle) {
+  const profile = buildRoutingProfile(message, signature);
+  const topGuideScore = Math.max(bundle.baselineDocs[0]?.alignmentScore ?? -Infinity, bundle.processDocs[0]?.alignmentScore ?? -Infinity);
+  const topCaseScore = bundle.caseHistories[0]?.alignmentScore ?? -Infinity;
+  const strongestScore = Math.max(topGuideScore, topCaseScore);
+  const diversity = computeEvidenceDiversity(bundle);
+
+  if (bundle.baselineDocs.length + bundle.processDocs.length + bundle.caseHistories.length === 0) {
+    return true;
+  }
+
+  if (signature.queryMode === "guide") {
+    return !Number.isFinite(topGuideScore) || topGuideScore < 72;
+  }
+
+  if (profile.requireGuideEvidence && (!Number.isFinite(topGuideScore) || topGuideScore < 72)) {
+    return !isStrongCaseEvidence(bundle.caseHistories);
+  }
+
+  if (isStrongCaseEvidence(bundle.caseHistories)) {
+    return false;
+  }
+
+  if (Number.isFinite(topGuideScore) && topGuideScore >= 76) {
+    return false;
+  }
+
+  if (diversity >= 2 && strongestScore >= 70) {
+    return false;
+  }
+
+  if (profile.allowCaseOnlyAnswer && Number.isFinite(topCaseScore) && topCaseScore >= 74) {
+    return false;
+  }
+
+  return !Number.isFinite(strongestScore) || strongestScore < 68;
+}
+
 async function groundEvidence(message: string, signature: SymptomSignature, evidenceItems: RetrievedEvidence[]) {
   const gated = applyRelevanceGate(message, signature, evidenceItems);
   const baselineDocs = gated.included.filter((item) => item.provenance === "baseline_doc").slice(0, 6);
@@ -1450,10 +1647,14 @@ async function groundEvidence(message: string, signature: SymptomSignature, evid
     processDocs,
     caseHistories,
     excluded: gated.excluded,
-    fallbackNeeded: baselineDocs.length + processDocs.length === 0,
+    fallbackNeeded: false,
   } satisfies GroundedEvidenceBundle;
+  const refined = await refineGroundingWithPrompt(signature, initial);
 
-  return refineGroundingWithPrompt(signature, initial);
+  return {
+    ...refined,
+    fallbackNeeded: shouldUseFallback(message, signature, refined),
+  } satisfies GroundedEvidenceBundle;
 }
 
 function extractEvidenceLines(evidence: RetrievedEvidence) {
@@ -1482,6 +1683,7 @@ function extractEvidenceLines(evidence: RetrievedEvidence) {
 }
 
 function scoreEvidenceLine(message: string, evidence: RetrievedEvidence, line: string) {
+  const profile = buildRoutingProfile(message, normalizeSymptomSignatureFallback(message));
   const queryTerms = extractTerms(message);
   const lineTerms = extractTerms(line);
   let score = evidence.alignmentScore + countOverlap(queryTerms, lineTerms) * 3;
@@ -1500,6 +1702,24 @@ function scoreEvidenceLine(message: string, evidence: RetrievedEvidence, line: s
 
   if (/기본|default|드라이버|driver|설치|재설치|포트|속성|호스트/i.test(line)) {
     score += 8;
+  }
+
+  if (profile.demoteConfigurationOnlyGuides && evidence.sourceType === "guide") {
+    const configurationOnlyLine =
+      /(설정|경로|메뉴|on|off|ip|포트|드라이버|setting|menu|path|select|assigned|type)/i.test(line) &&
+      !/(테스트|체크|확인|오류|고장|원인|교체|청소|test|check|error|fault|cause|clean|inspect)/i.test(line);
+
+    if (configurationOnlyLine) {
+      score -= 14;
+    }
+
+    if (/(테스트|체크|확인|오류|고장|원인|교체|청소|test|check|error|fault|cause|clean|inspect)/i.test(line)) {
+      score += 10;
+    }
+  }
+
+  if (profile.preferCaseActions && evidence.provenance === "case_history") {
+    score += 6;
   }
 
   return score;
@@ -1589,6 +1809,7 @@ function lineToCause(line: string, title: string) {
 }
 
 function buildSuspectedCauses(message: string, signature: SymptomSignature, bundle: GroundedEvidenceBundle) {
+  const profile = buildRoutingProfile(message, signature);
   const candidates: SectionCandidate[] = [];
 
   if (signature.intent === "official_process") {
@@ -1602,6 +1823,22 @@ function buildSuspectedCauses(message: string, signature: SymptomSignature, bund
       });
     }
   } else {
+    if (profile.preferCaseCauses) {
+      for (const item of bundle.caseHistories.slice(0, 2)) {
+        if (!item.summary?.root_cause) {
+          continue;
+        }
+
+        candidates.push({
+          text: `${normalizeLine(item.summary.root_cause)} 가능성`,
+          provenance: "case_history",
+          score: item.alignmentScore + 10,
+          evidenceId: item.id,
+          features: ["cause_hint"],
+        });
+      }
+    }
+
     for (const item of bundle.baselineDocs.slice(0, 2)) {
       const topLine = pickTopLines(message, [item], 1, 1)[0];
       candidates.push({
@@ -1663,10 +1900,13 @@ function findBestFeatureCandidate(message: string, evidence: RetrievedEvidence[]
 }
 
 function buildCheckCandidates(message: string, signature: SymptomSignature, bundle: GroundedEvidenceBundle) {
+  const profile = buildRoutingProfile(message, signature);
   const evidencePriority =
     signature.intent === "official_process"
       ? [...bundle.processDocs, ...bundle.baselineDocs]
-      : [...bundle.baselineDocs, ...bundle.processDocs, ...bundle.caseHistories];
+      : profile.preferCaseCauses
+        ? [...bundle.caseHistories, ...bundle.baselineDocs, ...bundle.processDocs]
+        : [...bundle.baselineDocs, ...bundle.caseHistories, ...bundle.processDocs];
   const candidates = buildLineCandidates(message, evidencePriority, SECTION_LIMITS.checks + 4, 2);
 
   if (!candidates.some((item) => item.features?.includes("test_step"))) {
@@ -1694,10 +1934,13 @@ function buildCheckCandidates(message: string, signature: SymptomSignature, bund
 }
 
 function buildActionCandidates(message: string, signature: SymptomSignature, bundle: GroundedEvidenceBundle) {
+  const profile = buildRoutingProfile(message, signature);
   const primaryEvidence =
     signature.intent === "official_process"
       ? [...bundle.processDocs, ...bundle.baselineDocs]
-      : [...bundle.baselineDocs, ...bundle.processDocs, ...bundle.caseHistories];
+      : profile.preferCaseActions
+        ? [...bundle.caseHistories, ...bundle.baselineDocs, ...bundle.processDocs]
+        : [...bundle.baselineDocs, ...bundle.caseHistories, ...bundle.processDocs];
   const candidates = buildLineCandidates(message, primaryEvidence, SECTION_LIMITS.actions + 4, 2);
 
   if (candidates.length === 0) {
@@ -1762,26 +2005,37 @@ function sectionFeatureBias(candidate: SectionCandidate, section: IncidentSectio
   );
 }
 
-function sectionPriorityScore(candidate: SectionCandidate, section: IncidentSectionKey) {
+function sectionPriorityScore(candidate: SectionCandidate, section: IncidentSectionKey, profile: RoutingProfile) {
   const specificity = candidateSpecificityScore(candidate.text);
   const provenanceBias =
     candidate.provenance === "baseline_doc"
-      ? 18
+      ? profile.sourceWeights.baseline_doc
       : candidate.provenance === "process_doc"
-        ? 10
+        ? profile.sourceWeights.process_doc
         : candidate.provenance === "case_history"
-          ? 0
+          ? profile.sourceWeights.case_history
           : -24;
   const sectionBias = section === "suspected_causes" && candidate.provenance === "case_history" ? 4 : 0;
-  const casePenalty = section !== "suspected_causes" && candidate.provenance === "case_history" ? -8 : 0;
+  const casePenalty =
+    section !== "suspected_causes" &&
+    candidate.provenance === "case_history" &&
+    !(section === "actions" && profile.preferCaseActions) &&
+    !(section === "checks" && profile.preferCaseCauses)
+      ? -8
+      : 0;
 
   return candidate.score + provenanceBias + sectionBias + casePenalty + specificity + sectionFeatureBias(candidate, section);
 }
 
-function sanitizeCandidates(candidates: SectionCandidate[], section: IncidentSectionKey, hasDocumentGrounding: boolean) {
+function sanitizeCandidates(
+  candidates: SectionCandidate[],
+  section: IncidentSectionKey,
+  hasDocumentGrounding: boolean,
+  profile: RoutingProfile,
+) {
   const sorted = [...candidates].sort((left, right) => {
-    const rightPriority = sectionPriorityScore(right, section);
-    const leftPriority = sectionPriorityScore(left, section);
+    const rightPriority = sectionPriorityScore(right, section, profile);
+    const leftPriority = sectionPriorityScore(left, section, profile);
 
     if (rightPriority !== leftPriority) {
       return rightPriority - leftPriority;
@@ -1812,7 +2066,7 @@ function sanitizeCandidates(candidates: SectionCandidate[], section: IncidentSec
       continue;
     }
 
-    if (section === "actions" && output.length < 3 && candidate.provenance === "case_history") {
+    if (section === "actions" && output.length < 3 && candidate.provenance === "case_history" && !profile.preferCaseActions) {
       continue;
     }
 
@@ -1828,20 +2082,24 @@ function sanitizeCandidates(candidates: SectionCandidate[], section: IncidentSec
 }
 
 function buildIncidentDraft(message: string, signature: SymptomSignature, bundle: GroundedEvidenceBundle): IncidentDraft {
+  const profile = buildRoutingProfile(message, signature);
   const suspectedCauses = sanitizeCandidates(
     buildSuspectedCauses(message, signature, bundle),
     "suspected_causes",
     bundle.baselineDocs.length + bundle.processDocs.length > 0,
+    profile,
   );
   const checks = sanitizeCandidates(
     buildCheckCandidates(message, signature, bundle),
     "checks",
     bundle.baselineDocs.length + bundle.processDocs.length > 0,
+    profile,
   );
   const actions = sanitizeCandidates(
     buildActionCandidates(message, signature, bundle),
     "actions",
     bundle.baselineDocs.length + bundle.processDocs.length > 0,
+    profile,
   );
   const fallbackUsed = bundle.fallbackNeeded || (checks[0]?.provenance === "inferred" && actions[0]?.provenance === "inferred");
 
@@ -1889,6 +2147,13 @@ function buildCompositionPrompt(signature: SymptomSignature, draft: IncidentDraf
 }
 
 function buildCompositionPromptV2(signature: SymptomSignature, draft: IncidentDraft) {
+  const profile = buildRoutingProfile(signature.symptomSummary, signature);
+  const priorityText =
+    profile.archetype === "process_execution"
+      ? "process_doc > baseline_doc > case_history"
+      : profile.preferCaseCauses
+        ? "case_history > baseline_doc > process_doc"
+        : "baseline_doc > case_history > process_doc";
   const serializeSection = (items: SectionCandidate[]) =>
     items.map((item, index) => `${index + 1}. (${item.provenance}) ${item.text}`).join("\n");
 
@@ -1914,6 +2179,7 @@ function buildCompositionPromptV2(signature: SymptomSignature, draft: IncidentDr
         `stage=${signature.stage}`,
         `polarity=${signature.polarity}`,
         `intent=${signature.intent}`,
+        `source_priority=${priorityText}`,
         "",
         "[suspected_causes]",
         serializeSection(draft.suspectedCauses),
@@ -2032,7 +2298,9 @@ function buildGuideExcerptMarkdown(sourceFile: string, sections: Array<{ title: 
 }
 
 function buildBaselineReference(message: string, bundle: GroundedEvidenceBundle, draft?: IncidentDraft): BaselineReference | null {
-  const docs = bundle.baselineDocs.length > 0 ? bundle.baselineDocs.slice(0, 4) : bundle.processDocs.slice(0, 3);
+  const docs = (bundle.baselineDocs.length > 0 ? bundle.baselineDocs.slice(0, 4) : bundle.processDocs.slice(0, 3)).filter(
+    (item) => (item.guideKind ?? "baseline_doc") !== "meta_doc" && item.alignmentScore >= 58,
+  );
 
   if (docs.length === 0) {
     return null;
@@ -2133,7 +2401,7 @@ function buildGuideResponseLegacy(
     similar_case_count: 0,
     top_similarity: topSimilarity,
     similar_cases: [],
-    fallback_used: false,
+    fallback_used: bundle.fallbackNeeded,
   };
 }
 
@@ -2276,11 +2544,12 @@ function finalizeIncidentResponseV2(
     signature.intent === "official_process"
       ? []
       : bundle.caseHistories.filter(
-          (item) => !item.exclusionReason && item.signature.stage === signature.stage && item.signature.polarity === signature.polarity,
+          (item) => !item.exclusionReason && (item.alignmentScore >= 78 || item.phraseMatches > 0),
         );
   const similarCases = similarCaseEvidence.slice(0, 3).flatMap((item) => (item.summary ? [item.summary] : []));
-  const topSimilarity =
-    bundle.baselineDocs[0]?.similarity ?? bundle.processDocs[0]?.similarity ?? similarCaseEvidence[0]?.similarity ?? null;
+  const topSimilarity = [...bundle.baselineDocs, ...bundle.processDocs, ...similarCaseEvidence]
+    .map((item) => item.similarity)
+    .sort((left, right) => right - left)[0] ?? null;
   const confidenceLevel = determineConfidenceLevel(topSimilarity, highThreshold, lowThreshold);
   const baselineReference = buildBaselineReference(signature.symptomSummary, bundle, draft);
   const sectionGroups = buildIncidentSectionGroups(signature, draft);
@@ -2303,20 +2572,23 @@ function finalizeIncidentResponseV2(
     similar_case_count: similarCases.length,
     top_similarity: topSimilarity,
     similar_cases: similarCases,
-    fallback_used: confidenceLevel === "low" || draft.fallbackUsed,
+    fallback_used: bundle.fallbackNeeded || draft.fallbackUsed,
   };
 }
 
 function buildDeterministicGrounding(message: string, signature: SymptomSignature, evidenceItems: RetrievedEvidence[]) {
   const gated = applyRelevanceGate(message, signature, evidenceItems);
-
-  return {
+  const bundle = {
     baselineDocs: gated.included.filter((item) => item.provenance === "baseline_doc").slice(0, 6),
     processDocs: gated.included.filter((item) => item.provenance === "process_doc").slice(0, 6),
     caseHistories: gated.included.filter((item) => item.provenance === "case_history").slice(0, 4),
     excluded: gated.excluded,
-    fallbackNeeded:
-      gated.included.filter((item) => item.provenance === "baseline_doc" || item.provenance === "process_doc").length === 0,
+    fallbackNeeded: false,
+  } satisfies GroundedEvidenceBundle;
+
+  return {
+    ...bundle,
+    fallbackNeeded: shouldUseFallback(message, signature, bundle),
   } satisfies GroundedEvidenceBundle;
 }
 

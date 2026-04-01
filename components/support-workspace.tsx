@@ -190,7 +190,7 @@ export function SupportWorkspace() {
           <span className="eyebrow">Ubcare Internal RAG Assistant</span>
           <h1 className="hero-title">유비케어 병원고객팀 상담지원 챗봇</h1>
           <p className="hero-subtitle">
-            상담 중 접수된 문제상황을 입력하면 설치가이드 기준과 과거 유사 사례를 분리해 읽기 쉬운 현장 대응 답변으로 정리합니다.
+            상담 중 접수된 문제상황을 입력하면 가이드와 유사 사례를 기반으로 대응 방안을 정리합니다.
           </p>
         </section>
 
@@ -200,7 +200,7 @@ export function SupportWorkspace() {
 
             <textarea
               className="prompt-box"
-              placeholder="예: 랜선은 점검했는데도 키오스크가 인터넷에 연결되지 않고, 결제와 접수가 모두 안 됩니다."
+              placeholder="예: 키오스크 프린터 출력이 되지 않습니다."
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
             />
@@ -228,7 +228,7 @@ export function SupportWorkspace() {
             ) : (
               <>
                 <div className="results-header">
-                  <h2 className="panel-title">추천 결과</h2>
+                  <h2 className="panel-title">결과</h2>
                   <button className="secondary-button" type="button" onClick={handleCopy}>
                     전체 복사
                   </button>

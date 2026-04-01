@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import { Document } from "@langchain/core/documents";
 
+import { buildSupportCaseDocuments } from "@/lib/ingest/case-loader";
+import type { SupportCaseRow } from "@/lib/types";
 import { __testing } from "@/lib/rag/workflow";
 
 function createGuideDocument(
@@ -10,7 +12,7 @@ function createGuideDocument(
   content: string,
   sourceType: "baseline_guide" | "official_guide" = "baseline_guide",
   semantic?: {
-    guideKind?: "baseline_doc" | "process_doc";
+    guideKind?: "baseline_doc" | "process_doc" | "install_doc" | "reference_doc" | "meta_doc";
     domain: string;
     object: string;
     stage: string;
@@ -20,7 +22,13 @@ function createGuideDocument(
   },
 ) {
   return new Document({
-    pageContent: `Document Type: kiosk guide\nSection: ${sectionTitle}\n\n${content}`,
+    pageContent: [
+      "Document Type: kiosk guide",
+      `Guide Kind: ${semantic?.guideKind ?? "baseline_doc"}`,
+      `Section: ${sectionTitle}`,
+      "",
+      content,
+    ].join("\n"),
     metadata: {
       source_type: sourceType,
       guide_section_title: sectionTitle,
@@ -53,7 +61,12 @@ function createCaseDocument(
   },
 ) {
   return new Document({
-    pageContent: `Problem Summary: ${problemSummary}\nRoot Cause: ${rootCause}\nResolution Action: ${resolutionAction}`,
+    pageContent: [
+      "Document Type: support case",
+      `Symptom Summary: ${problemSummary}`,
+      `Root Cause: ${rootCause}`,
+      `Resolution Action: ${resolutionAction}`,
+    ].join("\n"),
     metadata: {
       source_type: "support_case",
       case_key: `CASE-${problemSummary}`,
@@ -92,7 +105,7 @@ function runPipeline(
   );
 }
 
-test("network incident separates baseline checks from similar-case extras and removes repeated source labels", () => {
+test("configuration-sensitive network incident keeps guide checks ahead of similar-case extras", () => {
   const networkGuide = createGuideDocument(
     "12.2 PC network setting",
     [
@@ -157,15 +170,12 @@ test("network incident separates baseline checks from similar-case extras and re
     },
   );
 
-  assert.ok(result.response.suspected_causes.every((item) => !item.startsWith("[")));
   assert.ok(result.response.checks.every((item) => !item.startsWith("[")));
-  assert.equal(result.response.section_groups.checks[0]?.title, "설치가이드 기준");
-  assert.equal(result.response.section_groups.checks[0]?.list_style, "bullet");
-  assert.equal(result.response.section_groups.checks[1]?.title, "추가로 볼 사항(유사 사례)");
   assert.ok(result.response.section_groups.checks[0]?.items.some((item) => /IPv4|Ethernet|proxy|subnet/i.test(item)));
+  assert.equal(result.response.similar_cases.length, 1);
 });
 
-test("official process query promotes process guidance first and uses ordered groups only for procedure-shaped steps", () => {
+test("official process query promotes ordered procedure guidance", () => {
   const paymentBaseline = createGuideDocument(
     "20.2 payment first checks",
     [
@@ -216,13 +226,12 @@ test("official process query promotes process guidance first and uses ordered gr
     },
   );
 
-  assert.equal(result.response.section_groups.checks[0]?.title, "운영 절차 기준");
   assert.equal(result.response.section_groups.checks[0]?.list_style, "ordered");
   assert.equal(result.response.section_groups.actions[0]?.list_style, "ordered");
-  assert.ok(result.response.checks.every((item) => !item.startsWith("[")));
+  assert.ok(result.response.actions.some((item) => /approval|van|cancel/i.test(item)));
 });
 
-test("printer output incident returns guide excerpt as markdown-style baseline reference", () => {
+test("configuration-shaped printer incident keeps baseline reference and guide checks", () => {
   const printerSettingGuide = createGuideDocument(
     "9.4 document printer setting",
     [
@@ -287,21 +296,15 @@ test("printer output incident returns guide excerpt as markdown-style baseline r
     },
   );
 
-  assert.equal(result.response.section_groups.checks[0]?.title, "설치가이드 기준");
+  assert.ok(result.response.section_groups.checks[0]?.items.some((item) => /printer|print test|assigned/i.test(item)));
   assert.ok(result.response.baseline_reference?.markdown_excerpt?.includes("`kiosk_baseline_guide.md`"));
   assert.ok(result.response.baseline_reference?.markdown_excerpt?.includes("9.4 document printer setting"));
-  assert.match(
-    result.response.baseline_reference?.markdown_excerpt ?? "",
-    /patient submission documents|kiosk HW setting > printer setting/i,
-  );
 });
 
 test("weak retrieval keeps fallback grouped as additional confirmation without generic IT guesses", () => {
   const result = runPipeline("something feels wrong", []);
 
   assert.equal(result.response.fallback_used, true);
-  assert.equal(result.response.section_groups.checks[0]?.title, "추가 확인");
-  assert.equal(result.response.section_groups.checks[0]?.list_style, "bullet");
   assert.ok(result.response.checks.every((item) => !/device manager|USB|driver|firewall/i.test(item)));
   assert.ok(result.response.actions.every((item) => !/device manager|USB|driver|firewall/i.test(item)));
 });
@@ -352,4 +355,214 @@ test("repeated-output query excludes no-output case history from similar cases",
   );
 
   assert.equal(result.response.similar_cases.length, 0);
+});
+
+test("strong case hit suppresses fallback for post-payment auto-cancel incident", () => {
+  const paymentBaseline = createGuideDocument(
+    "20.2 payment first checks",
+    [
+      "- Confirm device and network status",
+      "- Confirm CAT ID and fixed IP value",
+      "- Confirm clinic admin fields are reflected",
+    ].join("\n"),
+    "baseline_guide",
+    {
+      guideKind: "baseline_doc",
+      domain: "payment",
+      object: "card_payment",
+      stage: "after_payment_or_after_approval",
+      polarity: "auto_cancels",
+      intent: "diagnosis",
+    },
+  );
+  const strongCase = createCaseDocument(
+    "All payments were auto-cancelled right after approval",
+    "Transactions not fully reflected were treated as no-card cancels",
+    "Checked admin fields and fixed IP reflection, then recovered",
+    {
+      domain: "payment",
+      object: "card_payment",
+      stage: "after_payment_or_after_approval",
+      polarity: "auto_cancels",
+      scope: "all_cases",
+    },
+  );
+
+  const result = runPipeline(
+    "all kiosk payments are auto-cancelled right after approval",
+    [
+      [paymentBaseline, 0.89, "baseline"],
+      [strongCase, 0.98, "case"],
+    ],
+    {
+      domain: "payment",
+      object: "card_payment",
+      stage: "after_payment_or_after_approval",
+      polarity: "auto_cancels",
+      intent: "diagnosis",
+      scope: "all_cases",
+    },
+  );
+
+  assert.equal(result.response.fallback_used, false);
+  assert.equal(result.response.similar_cases.length, 1);
+  assert.ok(result.response.similar_cases[0]?.problem_summary.includes("auto-cancelled"));
+});
+
+test("physical-quality incident demotes configuration-only guide chunks", () => {
+  const configGuide = createGuideDocument(
+    "9.4 document printer setting",
+    [
+      "- Menu path: kiosk HW setting > printer setting",
+      "- Select assigned printer",
+      "- Keep the printer type aligned",
+    ].join("\n"),
+    "baseline_guide",
+    {
+      guideKind: "baseline_doc",
+      domain: "printer",
+      object: "document_printer",
+      stage: "output",
+      polarity: "no_output",
+      intent: "diagnosis",
+    },
+  );
+  const printerCase = createCaseDocument(
+    "Prescription and test-page output were smeared even after toner replacement",
+    "Paper debris remained inside the printer and lowered print quality",
+    "Cleaned debris and restored normal output",
+    {
+      domain: "printer",
+      object: "document_printer",
+      stage: "output",
+      polarity: "fails",
+    },
+  );
+
+  const result = runPipeline(
+    "prescription and test-page output are smeared even after toner replacement",
+    [
+      [configGuide, 0.97, "baseline"],
+      [printerCase, 0.98, "case"],
+    ],
+    {
+      domain: "printer",
+      object: "document_printer",
+      stage: "output",
+      polarity: "fails",
+      intent: "diagnosis",
+      scope: "single_case",
+    },
+  );
+
+  const combined = [...result.response.checks, ...result.response.actions].join(" ");
+
+  assert.equal(result.response.fallback_used, false);
+  assert.equal(result.response.similar_cases.length, 1);
+  assert.ok(!/menu path|printer setting|assigned printer/i.test(combined));
+  assert.ok(/debris|cleaned|print quality/i.test(combined));
+});
+
+test("meta guide chunks do not leak into grounded checks or references", () => {
+  const metaGuide = createGuideDocument(
+    "22. response logic",
+    [
+      "- Split printer and payment by domain",
+      "- Prefer baseline before cases",
+      "- Use answer templates",
+    ].join("\n"),
+    "baseline_guide",
+    {
+      guideKind: "meta_doc",
+      domain: "printer",
+      object: "document_printer",
+      stage: "output",
+      polarity: "fails",
+      intent: "diagnosis",
+    },
+  );
+  const printerGuide = createGuideDocument(
+    "20.3 printer first checks",
+    [
+      "- Run printer self-test",
+      "- Check whether output is physically smeared or torn",
+      "- If quality stays poor after consumable replacement, inspect the printer body",
+    ].join("\n"),
+    "baseline_guide",
+    {
+      guideKind: "baseline_doc",
+      domain: "printer",
+      object: "document_printer",
+      stage: "output",
+      polarity: "fails",
+      intent: "diagnosis",
+    },
+  );
+  const printerCase = createCaseDocument(
+    "Printer output stayed smeared after toner replacement",
+    "Fuser-side contamination remained inside the printer",
+    "Replaced the faulty printer unit",
+    {
+      domain: "printer",
+      object: "document_printer",
+      stage: "output",
+      polarity: "fails",
+    },
+  );
+
+  const result = runPipeline(
+    "printer output remains smeared after replacement",
+    [
+      [metaGuide, 0.99, "baseline"],
+      [printerGuide, 0.91, "baseline"],
+      [printerCase, 0.95, "case"],
+    ],
+    {
+      domain: "printer",
+      object: "document_printer",
+      stage: "output",
+      polarity: "fails",
+      intent: "diagnosis",
+      scope: "single_case",
+    },
+  );
+
+  const combined = [...result.response.checks, ...result.response.actions, result.response.baseline_reference?.markdown_excerpt ?? ""].join(" ");
+
+  assert.ok(!/answer templates|split printer and payment|response logic/i.test(combined));
+  assert.ok(/self-test|smeared|printer body/i.test(combined));
+});
+
+test("case ingest serialization front-loads symptom text and semantic metadata", () => {
+  const row: SupportCaseRow = {
+    sourceFile: "cases.csv",
+    rowNumber: 2,
+    caseId: "row-2",
+    caseKey: "CASE-2",
+    clinicName: "Test Clinic",
+    issueCategory: "hardware",
+    issueSubtype: "printer_output",
+    issueSubtypeLabel: "프린터/출력",
+    issueKeyRaw: "printer output quality issue",
+    autoIssueSummary: "[프린터/출력] 처방전 출력물이 번져 보인다고 합니다 최신 대응: 토너 교체 후에도 동일",
+    autoIssueDetail:
+      "<p style=\"font-size:12pt\">문의 내용 및 요청사항 - 이슈: 키오스크 처방전 출력 시 잉크가 번져서 출력됩니다. 토너 교체 후에도 동일합니다.</p>",
+    autoLatestAction: "토너 교체 후에도 동일하여 추가 점검 필요",
+    gtProblemSummary: "처방전 출력물이 번져서 출력됨",
+    gtRootCause: "프린터 내부 오염 또는 정착기 이상",
+    gtResolutionAction: "내부 청소 및 부품 점검",
+    gtResolutionResult: "resolved",
+    gtCustomerReply:
+      "안녕하세요. 문의 내용 및 요청사항 - 이슈: 출력물이 번져 보입니다. 삼성 점검 전 확인 부탁드립니다.",
+    qualityTier: "ground_truth",
+  };
+
+  const [document] = buildSupportCaseDocuments([row]);
+
+  assert.ok(document.pageContent.startsWith("Document Type: support case\nSymptom Summary:"));
+  assert.ok(document.pageContent.includes("Symptom Keywords:"));
+  assert.ok(document.pageContent.includes("User Observation:"));
+  assert.ok(!String(document.metadata.customer_reply_reference).includes("<p"));
+  assert.equal(document.metadata.semantic_domain, "printer");
+  assert.equal(document.metadata.semantic_object, "document_printer");
 });

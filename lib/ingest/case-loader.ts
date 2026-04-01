@@ -5,6 +5,14 @@ import { Document } from "@langchain/core/documents";
 import { parse } from "csv-parse/sync";
 
 import { getAppConfig } from "@/lib/config";
+import {
+  classifyGuideKind,
+  cleanTextArtifacts,
+  extractSignalPhrases,
+  normalizeSymptomSignatureFallback,
+  truncateText,
+  uniqueStrings,
+} from "@/lib/rag/policy";
 import type { SupportCaseRow } from "@/lib/types";
 
 type RawCsvRow = Record<string, string | undefined>;
@@ -41,10 +49,97 @@ function clean(value: string | undefined) {
 }
 
 function buildProblemSummary(row: SupportCaseRow) {
-  return row.gtProblemSummary || row.autoIssueSummary || row.autoIssueDetail || row.issueKeyRaw;
+  return truncateText(
+    cleanTextArtifacts(row.gtProblemSummary || row.autoIssueSummary || row.autoIssueDetail || row.issueKeyRaw),
+    220,
+  );
+}
+
+function summarizeNarrative(text: string, maxChars = 240) {
+  const cleaned = cleanTextArtifacts(text)
+    .replace(/최신 대응[:：].*$/i, " ")
+    .replace(/문의 내용 및 요청사항[:：-]*/i, " ")
+    .replace(/구분 내용 고객정보/gi, " ")
+    .replace(/안녕하세요[^.。]*[.。]/g, " ")
+    .replace(/\s+\/\s+/g, ". ");
+  const issueMatch = cleaned.match(/(?:이슈|증상)[:：-]?\s*(.+)/i);
+  const focused = issueMatch?.[1] ?? cleaned;
+  const sentences = focused
+    .split(/(?<=[.!?。])\s+|\/+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 6);
+
+  return truncateText(sentences.slice(0, 2).join(" "), maxChars);
+}
+
+function buildUserObservation(row: SupportCaseRow) {
+  return uniqueStrings(
+    [
+      summarizeNarrative(row.autoIssueDetail, 220),
+      summarizeNarrative(row.autoIssueSummary, 220),
+      summarizeNarrative(row.gtCustomerReply, 220),
+      summarizeNarrative(row.autoLatestAction, 180),
+    ].filter(Boolean),
+    2,
+  ).join(" / ");
+}
+
+function buildSymptomKeywords(row: SupportCaseRow) {
+  return uniqueStrings(
+    [
+      row.issueSubtypeLabel,
+      row.issueSubtype,
+      row.issueCategory,
+      ...extractSignalPhrases(
+        [
+          row.gtProblemSummary,
+          row.autoIssueSummary,
+          row.autoIssueDetail,
+          row.gtRootCause,
+          row.gtResolutionAction,
+        ]
+          .filter(Boolean)
+          .join(" "),
+        8,
+      ),
+    ].filter(Boolean),
+    8,
+  );
 }
 
 function buildSearchableText(row: SupportCaseRow) {
+  const problemSummary = buildProblemSummary(row);
+  const userObservation = buildUserObservation(row);
+  const symptomKeywords = buildSymptomKeywords(row);
+  const signature = normalizeSymptomSignatureFallback(
+    [
+      problemSummary,
+      userObservation,
+      row.gtRootCause,
+      row.gtResolutionAction,
+      row.issueSubtypeLabel,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+
+  return [
+    "Document Type: support case",
+    `Symptom Summary: ${problemSummary || "unknown"}`,
+    userObservation ? `User Observation: ${userObservation}` : "",
+    symptomKeywords.length > 0 ? `Symptom Keywords: ${symptomKeywords.join(" | ")}` : "",
+    `Issue Category: ${row.issueCategory || "unknown"}`,
+    `Issue Subtype: ${row.issueSubtypeLabel || row.issueSubtype || "unknown"}`,
+    `Incident Archetype Hint: ${signature.domain}/${signature.object}/${signature.stage}/${signature.polarity}`,
+    `Root Cause: ${truncateText(cleanTextArtifacts(row.gtRootCause || "unknown"), 220)}`,
+    `Resolution Action: ${truncateText(cleanTextArtifacts(row.gtResolutionAction || "unknown"), 240)}`,
+    `Resolution Result: ${row.gtResolutionResult || "unknown"}`,
+    row.autoLatestAction ? `Latest Action Note: ${summarizeNarrative(row.autoLatestAction, 180)}` : "",
+    row.gtCustomerReply ? `Reference Note: ${summarizeNarrative(row.gtCustomerReply, 200)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
   return [
     `증상 요약: ${buildProblemSummary(row)}`,
     `자동 요약: ${row.autoIssueSummary || "기록 없음"}`,
@@ -102,7 +197,7 @@ function splitGuideIntoSections(markdown: string) {
   return sections;
 }
 
-function chunkGuideSection(section: GuideSection, chunkCharLimit = 2200) {
+function chunkGuideSection(section: GuideSection, chunkCharLimit = 1400) {
   const paragraphs = section.body
     .split(/\n{2,}/)
     .map((item) => item.trim())
@@ -278,8 +373,23 @@ export async function loadSupportCaseRows() {
 
 export function buildSupportCaseDocuments(rows: SupportCaseRow[]) {
   return rows.map(
-    (row) =>
-      new Document({
+    (row) => {
+      const problemSummary = buildProblemSummary(row);
+      const userObservation = buildUserObservation(row);
+      const symptomKeywords = buildSymptomKeywords(row);
+      const signature = normalizeSymptomSignatureFallback(
+        [
+          problemSummary,
+          userObservation,
+          row.gtRootCause,
+          row.gtResolutionAction,
+          row.issueSubtypeLabel,
+        ]
+          .filter(Boolean)
+          .join(" "),
+      );
+
+      return new Document({
         pageContent: buildSearchableText(row),
         metadata: {
           source_type: "support_case",
@@ -289,17 +399,28 @@ export function buildSupportCaseDocuments(rows: SupportCaseRow[]) {
           issue_category: row.issueCategory,
           issue_subtype: row.issueSubtype,
           issue_subtype_label: row.issueSubtypeLabel,
-          problem_summary: buildProblemSummary(row),
-          root_cause: row.gtRootCause,
-          resolution_action: row.gtResolutionAction,
+          problem_summary: problemSummary,
+          symptom_keywords: symptomKeywords,
+          user_observation: userObservation,
+          root_cause: truncateText(cleanTextArtifacts(row.gtRootCause), 220),
+          resolution_action: truncateText(cleanTextArtifacts(row.gtResolutionAction), 240),
           resolution_result: row.gtResolutionResult,
-          customer_reply_reference: row.gtCustomerReply,
-          latest_action_reference: row.autoLatestAction,
+          customer_reply_reference: summarizeNarrative(row.gtCustomerReply, 200),
+          latest_action_reference: summarizeNarrative(row.autoLatestAction, 180),
           quality_tier: row.qualityTier,
           source_file: row.sourceFile,
           row_number: row.rowNumber,
+          semantic_query_mode: signature.queryMode,
+          semantic_domain: signature.domain,
+          semantic_object: signature.object,
+          semantic_stage: signature.stage,
+          semantic_polarity: signature.polarity,
+          semantic_intent: signature.intent,
+          semantic_scope: signature.scope,
+          semantic_summary: signature.symptomSummary,
         },
-      }),
+      });
+    },
   );
 }
 
@@ -317,22 +438,64 @@ export async function buildBaselineGuideDocuments() {
     const sections = splitGuideIntoSections(markdown);
 
     for (const section of sections) {
+      const sectionGuideKind = classifyGuideKind(section.title, section.body);
+
+      if (sectionGuideKind === "meta_doc") {
+        continue;
+      }
+
       const sectionChunks = chunkGuideSection(section);
 
       for (const chunk of sectionChunks) {
+        const guideKind = classifyGuideKind(chunk.title, chunk.body);
+        const signature = normalizeSymptomSignatureFallback(`${chunk.title}\n${chunk.body}`);
+        const guideKeywords = uniqueStrings(
+          [
+            ...extractSignalPhrases(`${chunk.title}\n${chunk.body}`, 8),
+            signature.domain,
+            signature.object,
+            signature.stage,
+            signature.polarity,
+          ].filter(Boolean),
+          8,
+        );
+
         documents.push(
           new Document({
-            pageContent: [
+            /*
+            */
+            /* pageContent: [
               "문서 유형: 키오스크 기준 가이드",
               `섹션: ${chunk.title}`,
               "",
               chunk.body,
             ].join("\n"),
+            */
+            pageContent: [
+              "Document Type: kiosk guide",
+              `Guide Kind: ${guideKind}`,
+              `Section Title: ${chunk.title}`,
+              guideKeywords.length > 0 ? `Guide Keywords: ${guideKeywords.join(" | ")}` : "",
+              "",
+              chunk.body,
+            ]
+              .filter(Boolean)
+              .join("\n"),
             metadata: {
               source_type: file.sourceType,
               guide_section_title: chunk.title,
               guide_chunk_index: chunk.chunkIndex,
               source_file: path.basename(file.path),
+              guide_kind: guideKind,
+              guide_keywords: guideKeywords,
+              semantic_query_mode: signature.queryMode,
+              semantic_domain: signature.domain,
+              semantic_object: signature.object,
+              semantic_stage: signature.stage,
+              semantic_polarity: signature.polarity,
+              semantic_intent: signature.intent,
+              semantic_scope: signature.scope,
+              semantic_summary: signature.symptomSummary,
               quality_tier: file.sourceType === "baseline_guide" ? "guide_baseline" : "guide_official",
             },
           }),
