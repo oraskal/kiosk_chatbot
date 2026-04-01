@@ -218,6 +218,7 @@ function runPipeline(
     domain?: "payment" | "printer" | "scanner" | "launcher" | "login" | "network" | "display" | "etc";
     object?:
       | "card_payment"
+      | "payment_reader"
       | "receipt_printer"
       | "document_printer"
       | "barcode_scanner"
@@ -406,7 +407,7 @@ test("cannot-cancel query prioritizes official process and excludes auto-cancel 
   });
 
   assert.match(result.response.checks[0] ?? "", /^\[운영 절차\]/);
-  assert.match(result.response.next_actions[0] ?? "", /^\[운영 절차\]/);
+  assert.match(result.response.actions[0] ?? "", /^\[운영 절차\]/);
   assert.ok(result.response.suspected_causes[0]?.includes("공식 운영 절차") || result.response.suspected_causes[0]?.includes("처리 기준"));
   assert.ok(result.response.similar_cases.every((item) => !/자동 취소/.test(item.problem_summary)));
 });
@@ -594,13 +595,63 @@ test("payment settlement-loss incident surfaces fixed IP check from aligned evid
   assert.equal(result.signature.stage, "after_payment_or_after_approval");
   assert.equal(result.signature.polarity, "auto_cancels");
   assert.ok(
-    [...result.response.checks, ...result.response.next_actions, ...result.response.suspected_causes].some((item) =>
+    [...result.response.checks, ...result.response.actions, ...result.response.suspected_causes].some((item) =>
       /고정\s*IP|수동\s*IP/i.test(item),
     ),
   );
   assert.ok(result.response.checks.some((item) => /고정\s*IP|수동\s*IP/i.test(item)));
   assert.ok((result.response.suspected_causes[0] ?? "").startsWith("[기준 문서]"));
   assert.ok(result.response.checks.every((item) => !/승인번호|운영기획팀|취소 요청 프로세스/i.test(item)));
+});
+
+test("post-payment anomaly excludes payment-reader failure cases through object and stage alignment", () => {
+  const settlementBaseline = createGuideDocument(
+    "결제 승인 후 반영 점검",
+    [
+      "- 승인 이후 수납 반영 여부 확인",
+      "- 네트워크 및 고정 IP 기준값 확인",
+    ].join("\n"),
+    "baseline_guide",
+    {
+      guideKind: "baseline_doc",
+      domain: "payment",
+      object: "card_payment",
+      stage: "after_payment_or_after_approval",
+      polarity: "auto_cancels",
+      intent: "diagnosis",
+    },
+  );
+  const paymentReaderCase = createCaseDocument(
+    "카드 리더기가 IC 카드를 인식하지 못함",
+    "카드 단말기 또는 리더기 불량",
+    "단말기 교체 후 재확인",
+    {
+      domain: "payment",
+      object: "payment_reader",
+      stage: "recognition",
+      polarity: "recognition_fail",
+    },
+  );
+
+  const result = runPipeline(
+    "승인까지는 된 것 같은데 조금 뒤에 보면 결제가 취소로 바뀌고 수납 반영도 안 됩니다",
+    [
+      [settlementBaseline, 0.88, "baseline"],
+      [paymentReaderCase, 0.97, "case"],
+    ],
+    {
+      domain: "payment",
+      object: "card_payment",
+      stage: "after_payment_or_after_approval",
+      polarity: "auto_cancels",
+      intent: "diagnosis",
+      scope: "single_case",
+    },
+  );
+
+  assert.ok(result.response.suspected_causes.every((item) => !/리더기|단말기 교체/i.test(item)));
+  assert.ok(result.response.checks.every((item) => !/리더기|단말기 교체/i.test(item)));
+  assert.equal(result.response.similar_cases.length, 0);
 });
 
 test("printer output incident prioritizes test print baseline checks and links driver guide section", () => {
@@ -659,10 +710,10 @@ test("printer output incident prioritizes test print baseline checks and links d
   ]);
   const combined = [
     ...result.response.checks,
-    ...result.response.next_actions,
-    result.response.related_guide_title,
-    result.response.related_guide_excerpt,
-    result.response.related_guide_reason,
+    ...result.response.actions,
+    ...(result.response.baseline_reference?.source_titles ?? []),
+    ...(result.response.baseline_reference?.source_files ?? []),
+    ...(result.response.baseline_reference?.excerpts ?? []),
   ].join("\n");
 
   assert.equal(result.signature.domain, "printer");
@@ -672,10 +723,10 @@ test("printer output incident prioritizes test print baseline checks and links d
   assert.match(combined, /프린터 설정|기본 프린터/i);
   assert.match(combined, /드라이버/i);
   assert.match(combined, /기본 프린터|기본 세팅|불일치|상이|호스트 네임|포트 구성/i);
-  assert.equal(result.response.show_related_guide, true);
-  assert.match(result.response.related_guide_title, /kiosk_baseline_guide\.md/i);
+  assert.ok(Boolean(result.response.baseline_reference));
+  assert.match(result.response.baseline_reference?.source_files.join(" ") ?? "", /kiosk_baseline_guide\.md/i);
   assert.match(
-    `${result.response.related_guide_title}\n${result.response.related_guide_excerpt}\n${result.response.related_guide_reason}`,
+    `${result.response.baseline_reference?.source_titles.join("\n")}\n${result.response.baseline_reference?.excerpts.join("\n")}`,
     /드라이버|기본 프린터/i,
   );
 });
@@ -686,5 +737,5 @@ test("weak retrieval falls back conservatively without generic IT guesses", () =
   assert.equal(result.response.fallback_used, true);
   assert.match(result.response.checks[0] ?? "", /^\[추정 보완\]/);
   assert.ok(result.response.checks.every((item) => !/장치관리자|USB|드라이버|방화벽/.test(item)));
-  assert.ok(result.response.next_actions.every((item) => !/장치관리자|USB|드라이버|방화벽/.test(item)));
+  assert.ok(result.response.actions.every((item) => !/장치관리자|USB|드라이버|방화벽/.test(item)));
 });

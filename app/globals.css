@@ -206,6 +206,11 @@ a {
   gap: 14px;
 }
 
+.results-stack {
+  display: grid;
+  gap: 14px;
+}
+
 .incident-layout {
   display: grid;
   gap: 14px;
@@ -243,6 +248,13 @@ a {
 
 .result-list li + li {
   margin-top: 8px;
+}
+
+.baseline-meta {
+  margin-bottom: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  font-size: 0.92rem;
 }
 
 .reply-box {
@@ -384,6 +396,11 @@ a {
   border: 1px solid rgba(29, 36, 51, 0.08);
   border-radius: 18px;
   background: #fff;
+}
+
+.case-list {
+  display: grid;
+  gap: 12px;
 }
 
 .case-card p {

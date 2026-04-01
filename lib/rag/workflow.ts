@@ -5,12 +5,13 @@ import { z } from "zod";
 
 import { getRequiredServerConfig } from "@/lib/config";
 import { getSupabaseVectorStore } from "@/lib/rag/vector-store";
-import type { ChatApiResponse, ConfidenceLevel, QueryMode, SimilarCaseSummary } from "@/lib/types";
+import type { BaselineReference, ChatApiResponse, ConfidenceLevel, QueryMode, SimilarCaseSummary } from "@/lib/types";
 
 const QUERY_MODE_VALUES = ["incident", "guide"] as const;
 const DOMAIN_VALUES = ["payment", "printer", "scanner", "launcher", "login", "network", "display", "etc"] as const;
 const OBJECT_VALUES = [
   "card_payment",
+  "payment_reader",
   "receipt_printer",
   "document_printer",
   "barcode_scanner",
@@ -59,7 +60,8 @@ type Polarity = (typeof POLARITY_VALUES)[number];
 type Intent = (typeof INTENT_VALUES)[number];
 type Scope = (typeof SCOPE_VALUES)[number];
 type EvidenceProvenance = (typeof PROVENANCE_VALUES)[number];
-type IncidentSectionKey = "suspected_causes" | "checks" | "next_actions";
+type LineFeature = "menu_path" | "test_step" | "config_step" | "install_step" | "process_step" | "cause_hint" | "guide_hint";
+type IncidentSectionKey = "suspected_causes" | "checks" | "actions";
 type RetrievalChannel = "baseline" | "process" | "case";
 
 type SymptomSignature = {
@@ -128,21 +130,14 @@ type SectionCandidate = {
   provenance: EvidenceProvenance;
   score: number;
   evidenceId?: string;
+  features?: LineFeature[];
 };
 
 type IncidentDraft = {
   suspectedCauses: SectionCandidate[];
   checks: SectionCandidate[];
-  nextActions: SectionCandidate[];
-  hospitalReply: string;
+  actions: SectionCandidate[];
   fallbackUsed: boolean;
-};
-
-type GuidePreview = {
-  show_related_guide: boolean;
-  related_guide_title: string;
-  related_guide_excerpt: string;
-  related_guide_reason: string;
 };
 
 const interpretationSchema = z.object({
@@ -167,10 +162,7 @@ const groundingSchema = z.object({
 const compositionSchema = z.object({
   suspected_causes: z.array(z.string()).min(0).max(4),
   checks: z.array(z.string()).min(1).max(6),
-  next_actions: z.array(z.string()).min(1).max(6),
-  guide_overview: z.string(),
-  guide_steps: z.array(z.string()).max(8),
-  hospital_reply: z.string(),
+  actions: z.array(z.string()).min(1).max(6),
 });
 
 const PROVENANCE_LABEL: Record<EvidenceProvenance, string> = {
@@ -190,7 +182,7 @@ const PROVENANCE_PRIORITY: Record<EvidenceProvenance, number> = {
 const SECTION_LIMITS: Record<IncidentSectionKey, number> = {
   suspected_causes: 4,
   checks: 6,
-  next_actions: 6,
+  actions: 6,
 };
 
 const GUIDE_PROCESS_PATTERNS = [
@@ -460,6 +452,9 @@ function inferDomain(text: string): Domain {
 
 function inferObject(text: string, domain: Domain): EvidenceObject {
   if (domain === "payment") {
+    if (/(리더기|단말기|ic|마그네틱|긁|삽입|카드 인식|카드인식|reader|terminal)/i.test(text)) {
+      return "payment_reader";
+    }
     return "card_payment";
   }
   if (/(영수증|롤프린터|카드 영수증)/i.test(text)) {
@@ -692,6 +687,8 @@ function objectQueryTerms(object: EvidenceObject) {
   switch (object) {
     case "card_payment":
       return "카드 결제";
+    case "payment_reader":
+      return "카드 리더기 단말기";
     case "receipt_printer":
       return "영수증 프린터";
     case "document_printer":
@@ -1094,6 +1091,103 @@ function isStrongPolarityMismatch(query: SymptomSignature, evidence: RetrievedEv
   return mismatchPairs.has(`${left}|${right}`);
 }
 
+function isGenericStage(stage: Stage) {
+  return stage === "etc" || stage === "in_progress" || stage === "before_action" || stage === "after_action";
+}
+
+function stageFamily(stage: Stage) {
+  switch (stage) {
+    case "after_payment_or_after_approval":
+      return "post_action";
+    case "cancel_flow":
+      return "cancel";
+    case "startup":
+      return "startup";
+    case "output":
+      return "output";
+    case "recognition":
+      return "recognition";
+    case "login_flow":
+      return "login";
+    case "network_flow":
+      return "network";
+    case "before_action":
+    case "in_progress":
+      return "active";
+    case "after_action":
+      return "post_action_generic";
+    default:
+      return "generic";
+  }
+}
+
+function isGenericPolarity(polarity: Polarity) {
+  return polarity === "unknown" || polarity === "fails" || polarity === "does_not_happen" || polarity === "repeats";
+}
+
+function polarityFamily(polarity: Polarity) {
+  switch (polarity) {
+    case "auto_cancels":
+    case "auto_happens":
+    case "closes_immediately":
+      return "unexpected_auto";
+    case "cannot_cancel":
+      return "blocked_process";
+    case "outputs_twice":
+    case "scans_twice":
+    case "repeats":
+      return "repeated";
+    case "no_output":
+    case "recognition_fail":
+    case "fails_to_start":
+    case "fails":
+    case "does_not_happen":
+      return "failure";
+    default:
+      return "generic";
+  }
+}
+
+function computeStageAlignmentBonus(query: SymptomSignature, evidence: RetrievedEvidence) {
+  if (query.stage === evidence.signature.stage) {
+    return 14;
+  }
+
+  if (query.stage === "etc" || evidence.signature.stage === "etc") {
+    return 0;
+  }
+
+  if (isGenericStage(evidence.signature.stage) && !isGenericStage(query.stage)) {
+    return evidence.provenance === "case_history" ? -22 : -12;
+  }
+
+  if (stageFamily(query.stage) === stageFamily(evidence.signature.stage)) {
+    return 6;
+  }
+
+  return -10;
+}
+
+function computePolarityAlignmentBonus(query: SymptomSignature, evidence: RetrievedEvidence) {
+  if (query.polarity === evidence.signature.polarity) {
+    return 14;
+  }
+
+  if (query.polarity === "unknown" || evidence.signature.polarity === "unknown") {
+    return 0;
+  }
+
+  if (isGenericPolarity(evidence.signature.polarity) && !isGenericPolarity(query.polarity)) {
+    return evidence.provenance === "case_history" ? -20 : -10;
+  }
+
+  if (polarityFamily(query.polarity) === polarityFamily(evidence.signature.polarity)) {
+    return 6;
+  }
+
+  return -10;
+}
+
 function computeAlignmentScore(message: string, query: SymptomSignature, evidence: RetrievedEvidence) {
   if (isStrongDomainMismatch(query, evidence)) {
     return { included: false, score: -100, reason: "domain mismatch" };
@@ -1118,8 +1212,8 @@ function computeAlignmentScore(message: string, query: SymptomSignature, evidenc
   score += countOverlap(queryTerms, evidenceTerms) * 2;
   score += query.domain === evidence.signature.domain ? 20 : 0;
   score += query.object === evidence.signature.object ? 16 : 0;
-  score += query.stage === evidence.signature.stage ? 14 : 0;
-  score += query.polarity === evidence.signature.polarity ? 14 : 0;
+  score += computeStageAlignmentBonus(query, evidence);
+  score += computePolarityAlignmentBonus(query, evidence);
   score += evidence.retrievalChannels.includes("baseline") && evidence.provenance === "baseline_doc" ? 8 : 0;
   score += evidence.retrievalChannels.includes("process") && evidence.provenance === "process_doc" ? 8 : 0;
   score += evidence.retrievalChannels.includes("case") && evidence.provenance === "case_history" ? 8 : 0;
@@ -1330,6 +1424,35 @@ function scoreEvidenceLine(message: string, evidence: RetrievedEvidence, line: s
   return score;
 }
 
+function classifyLineFeatures(line: string): LineFeature[] {
+  const features = new Set<LineFeature>();
+
+  if (/>|경로|메뉴|화면/i.test(line)) {
+    features.add("menu_path");
+  }
+  if (/테스트|시험|점검|체크/i.test(line)) {
+    features.add("test_step");
+  }
+  if (/설정|기본|ON|OFF|포트|속성|호스트|IP|유형|선택/i.test(line)) {
+    features.add("config_step");
+  }
+  if (/설치|재설치|드라이버|driver|guide|가이드|pdf/i.test(line)) {
+    features.add("install_step");
+    features.add("guide_hint");
+  }
+  if (/절차|프로세스|요청|접수|전달|후속/i.test(line)) {
+    features.add("process_step");
+  }
+  if (/원인|이탈|불일치|상이|누락|미반영|고장|오류|가능성/i.test(line)) {
+    features.add("cause_hint");
+  }
+  if (/`[^`]+`|\.md\b|\.pdf\b/i.test(line)) {
+    features.add("guide_hint");
+  }
+
+  return [...features];
+}
+
 function pickTopLines(message: string, evidence: RetrievedEvidence[], maxItems: number, maxPerEvidence = 2) {
   const scored = evidence.flatMap((item) =>
     extractEvidenceLines(item)
@@ -1339,13 +1462,14 @@ function pickTopLines(message: string, evidence: RetrievedEvidence[], maxItems: 
         evidenceId: item.id,
         provenance: item.provenance,
         score: scoreEvidenceLine(message, item, line),
+        features: classifyLineFeatures(line),
       })),
   );
 
   scored.sort((left, right) => right.score - left.score);
 
   const perEvidenceCount = new Map<string, number>();
-  const selected: Array<{ text: string; provenance: EvidenceProvenance; score: number; evidenceId?: string }> = [];
+  const selected: Array<{ text: string; provenance: EvidenceProvenance; score: number; evidenceId?: string; features: LineFeature[] }> = [];
   const seen = new Set<string>();
 
   for (const item of scored) {
@@ -1393,16 +1517,18 @@ function buildSuspectedCauses(message: string, signature: SymptomSignature, bund
         provenance: "process_doc",
         score: bundle.processDocs[0].alignmentScore,
         evidenceId: bundle.processDocs[0].id,
+        features: ["process_step"],
       });
     }
   } else {
     for (const item of bundle.baselineDocs.slice(0, 2)) {
-      const topLine = pickTopLines(message, [item], 1, 1)[0]?.text;
+      const topLine = pickTopLines(message, [item], 1, 1)[0];
       candidates.push({
-        text: lineToCause(topLine ?? item.title, item.title),
+        text: lineToCause(topLine?.text ?? item.title, item.title),
         provenance: "baseline_doc",
         score: item.alignmentScore,
         evidenceId: item.id,
+        features: ["cause_hint", ...(topLine?.features ?? [])],
       });
     }
 
@@ -1412,6 +1538,7 @@ function buildSuspectedCauses(message: string, signature: SymptomSignature, bund
         provenance: "case_history",
         score: bundle.caseHistories[0].alignmentScore,
         evidenceId: bundle.caseHistories[0].id,
+        features: ["cause_hint"],
       });
     }
   }
@@ -1421,31 +1548,37 @@ function buildSuspectedCauses(message: string, signature: SymptomSignature, bund
       text: "현재 확보된 기준문서와 사례만으로는 특정 원인을 단정하기 어렵습니다.",
       provenance: "inferred",
       score: 1,
+      features: [],
     });
   }
 
   return candidates;
 }
 
-function buildPrinterOutputFocusCandidates(
-  message: string,
-  bundle: GroundedEvidenceBundle,
-  patterns: RegExp[],
-  maxItems: number,
-) {
-  return [...bundle.baselineDocs, ...bundle.caseHistories]
+function buildLineCandidates(message: string, evidence: RetrievedEvidence[], maxItems: number, maxPerEvidence = 2) {
+  return pickTopLines(message, evidence, maxItems, maxPerEvidence).map((item) => ({
+    text: item.text,
+    provenance: item.provenance,
+    score: item.score,
+    evidenceId: item.evidenceId,
+    features: item.features,
+  }));
+}
+
+function findBestFeatureCandidate(message: string, evidence: RetrievedEvidence[], feature: LineFeature) {
+  return evidence
     .flatMap((item) =>
       extractEvidenceLines(item)
-        .filter((line) => patterns.some((pattern) => pattern.test(line)))
         .map((line) => ({
           text: line,
           provenance: item.provenance,
-          score: scoreEvidenceLine(message, item, line) + 18,
+          score: scoreEvidenceLine(message, item, line),
           evidenceId: item.id,
-        })),
+          features: classifyLineFeatures(line),
+        }))
+        .filter((item) => item.features.includes(feature)),
     )
-    .sort((left, right) => right.score - left.score)
-    .slice(0, maxItems);
+    .sort((left, right) => right.score - left.score)[0];
 }
 
 function buildCheckCandidates(message: string, signature: SymptomSignature, bundle: GroundedEvidenceBundle) {
@@ -1453,132 +1586,38 @@ function buildCheckCandidates(message: string, signature: SymptomSignature, bund
     signature.intent === "official_process"
       ? [...bundle.processDocs, ...bundle.baselineDocs]
       : [...bundle.baselineDocs, ...bundle.processDocs, ...bundle.caseHistories];
-  const seededEvidence =
-    signature.intent === "official_process"
-      ? [...bundle.processDocs.slice(0, 1), ...bundle.baselineDocs.slice(0, 2)]
-      : [...bundle.baselineDocs.slice(0, 2), ...bundle.caseHistories.slice(0, 1), ...bundle.processDocs.slice(0, 1)];
-  const candidates = [
-    ...seededEvidence.flatMap((item) => {
-      const seeded = pickTopLines(message, [item], 1, 1)[0];
+  const candidates = buildLineCandidates(message, evidencePriority, SECTION_LIMITS.checks + 4, 2);
 
-      if (!seeded) {
-        return [];
-      }
+  if (!candidates.some((item) => item.features?.includes("test_step"))) {
+    const bestTestCandidate = findBestFeatureCandidate(message, evidencePriority, "test_step");
 
-      return [
-        {
-          text: seeded.text,
-          provenance: seeded.provenance,
-          score: seeded.score + 6,
-          evidenceId: seeded.evidenceId,
-        } satisfies SectionCandidate,
-      ];
-    }),
-    ...pickTopLines(message, evidencePriority, SECTION_LIMITS.checks).map((item) => ({
-      text: item.text,
-      provenance: item.provenance,
-      score: item.score,
-      evidenceId: item.evidenceId,
-    })),
-  ];
-
-  const normalizedCandidates = candidates.map((item) => ({
-    text: item.text,
-    provenance: item.provenance,
-    score: item.score,
-    evidenceId: item.evidenceId,
-  }));
-  const printerFocusCandidates =
-    signature.domain === "printer" && signature.stage === "output" && signature.polarity === "no_output"
-      ? buildPrinterOutputFocusCandidates(message, bundle, [/테스트 페이지/i, /출력 테스트/i, /테스트인쇄/i], 2)
-      : [];
-  normalizedCandidates.unshift(...printerFocusCandidates);
-  const hasTestLikeCheck = normalizedCandidates.some((item) => /테스트|시험|test/i.test(item.text));
-
-  if (!hasTestLikeCheck) {
-    const testLikeLine = evidencePriority
-      .flatMap((item) =>
-        extractEvidenceLines(item)
-          .filter((line) => /테스트|시험|test/i.test(line))
-          .map((line) => ({
-            text: line,
-            provenance: item.provenance,
-            score: scoreEvidenceLine(message, item, line),
-            evidenceId: item.id,
-          })),
-      )
-      .sort((left, right) => right.score - left.score)[0];
-
-    if (testLikeLine) {
-      normalizedCandidates.unshift({
-        text: testLikeLine.text,
-        provenance: testLikeLine.provenance,
-        score: testLikeLine.score + 14,
-        evidenceId: testLikeLine.evidenceId,
+    if (bestTestCandidate) {
+      candidates.unshift({
+        ...bestTestCandidate,
+        score: bestTestCandidate.score + 12,
       });
     }
   }
 
-  if (normalizedCandidates.length === 0) {
-    normalizedCandidates.push({
+  if (candidates.length === 0) {
+    candidates.push({
       text: "증상과 직접 맞닿은 기준문서가 부족하므로 실제 메뉴 경로와 설정값을 추가로 확인해야 합니다.",
       provenance: "inferred",
       score: 1,
       evidenceId: undefined,
+      features: [],
     });
   }
 
-  return normalizedCandidates;
+  return candidates;
 }
 
-function buildNextActionCandidates(message: string, signature: SymptomSignature, bundle: GroundedEvidenceBundle) {
+function buildActionCandidates(message: string, signature: SymptomSignature, bundle: GroundedEvidenceBundle) {
   const primaryEvidence =
     signature.intent === "official_process"
       ? [...bundle.processDocs, ...bundle.baselineDocs]
       : [...bundle.baselineDocs, ...bundle.processDocs, ...bundle.caseHistories];
-  const candidates = [
-    ...(
-      signature.domain === "printer" && signature.stage === "output" && signature.polarity === "no_output"
-        ? buildPrinterOutputFocusCandidates(
-            message,
-            bundle,
-            [/기본 프린터/i, /드라이버/i, /driver/i, /재설치/i, /호스트 네임/i, /포트/i],
-            3,
-          )
-        : []
-    ),
-    ...pickTopLines(message, primaryEvidence, SECTION_LIMITS.next_actions).map((item) => ({
-      text: item.text,
-      provenance: item.provenance,
-      score: item.score,
-      evidenceId: item.evidenceId,
-    })),
-  ].map((item) => ({
-    text: item.text,
-    provenance: item.provenance,
-    score: item.score,
-    evidenceId: item.evidenceId,
-  }));
-  const hasDriverLikeAction = candidates.some((item) => /드라이버|driver|기본 프린터|호스트 네임/i.test(item.text));
-
-  if (!hasDriverLikeAction && signature.domain === "printer" && signature.stage === "output" && signature.polarity === "no_output") {
-    const driverLikeLine = [...bundle.baselineDocs, ...bundle.caseHistories]
-      .flatMap((item) =>
-        extractEvidenceLines(item)
-          .filter((line) => /드라이버|driver|기본 프린터|호스트 네임/i.test(line))
-          .map((line) => ({
-            text: line,
-            provenance: item.provenance,
-            score: scoreEvidenceLine(message, item, line) + 14,
-            evidenceId: item.id,
-          })),
-      )
-      .sort((left, right) => right.score - left.score)[0];
-
-    if (driverLikeLine) {
-      candidates.unshift(driverLikeLine);
-    }
-  }
+  const candidates = buildLineCandidates(message, primaryEvidence, SECTION_LIMITS.actions + 4, 2);
 
   if (candidates.length === 0) {
     candidates.push({
@@ -1586,33 +1625,11 @@ function buildNextActionCandidates(message: string, signature: SymptomSignature,
       provenance: "inferred",
       score: 1,
       evidenceId: undefined,
+      features: [],
     });
   }
 
   return candidates;
-}
-
-function buildHospitalReply(signature: SymptomSignature, checks: SectionCandidate[], nextActions: SectionCandidate[], fallbackUsed: boolean) {
-  if (fallbackUsed) {
-    return "현재는 근거 문서가 부족해 추정 안내를 줄이고, 실제 화면명과 설정값을 확인한 뒤 다시 안내드리겠습니다.";
-  }
-
-  const primaryCheck = normalizeLine(checks[0]?.text ?? "");
-  const primaryAction = normalizeLine(nextActions[0]?.text ?? "");
-
-  if (signature.intent === "official_process" && primaryAction) {
-    return `${primaryAction} 기준으로 먼저 안내드리고, 승인정보가 확보되면 공식 절차에 맞춰 후속 처리를 진행하겠습니다.`;
-  }
-
-  if (primaryCheck && primaryAction) {
-    return `${primaryCheck} 항목부터 기준문서대로 확인한 뒤 ${primaryAction} 방향으로 안내드리겠습니다.`;
-  }
-
-  if (primaryCheck) {
-    return `${primaryCheck} 항목부터 기준문서대로 확인해 안내드리겠습니다.`;
-  }
-
-  return "기준문서와 운영 절차를 다시 대조한 뒤 안내드리겠습니다.";
 }
 
 function candidateSpecificityScore(text: string) {
@@ -1633,6 +1650,37 @@ function candidateSpecificityScore(text: string) {
   return score;
 }
 
+function sectionFeatureBias(candidate: SectionCandidate, section: IncidentSectionKey) {
+  const features = new Set(candidate.features ?? []);
+
+  if (section === "suspected_causes") {
+    return (
+      (features.has("cause_hint") ? 14 : 0) +
+      (features.has("config_step") ? 6 : 0) -
+      (features.has("process_step") ? 10 : 0) -
+      (features.has("install_step") ? 4 : 0)
+    );
+  }
+
+  if (section === "checks") {
+    return (
+      (features.has("test_step") ? 40 : 0) +
+      (features.has("config_step") ? 18 : 0) +
+      (features.has("menu_path") ? 12 : 0) +
+      (features.has("guide_hint") ? 4 : 0) -
+      (features.has("process_step") ? 6 : 0)
+    );
+  }
+
+  return (
+    (features.has("config_step") ? 18 : 0) +
+    (features.has("install_step") ? 16 : 0) +
+    (features.has("guide_hint") ? 8 : 0) +
+    (features.has("process_step") ? 10 : 0) +
+    (features.has("test_step") ? 4 : 0)
+  );
+}
+
 function sectionPriorityScore(candidate: SectionCandidate, section: IncidentSectionKey) {
   const specificity = candidateSpecificityScore(candidate.text);
   const provenanceBias =
@@ -1644,9 +1692,9 @@ function sectionPriorityScore(candidate: SectionCandidate, section: IncidentSect
           ? 0
           : -24;
   const sectionBias = section === "suspected_causes" && candidate.provenance === "case_history" ? 4 : 0;
-  const caseCheckBias = section === "checks" && candidate.provenance === "case_history" && specificity >= 8 ? 12 : 0;
+  const casePenalty = section !== "suspected_causes" && candidate.provenance === "case_history" ? -8 : 0;
 
-  return candidate.score + provenanceBias + sectionBias + caseCheckBias + specificity;
+  return candidate.score + provenanceBias + sectionBias + casePenalty + specificity + sectionFeatureBias(candidate, section);
 }
 
 function sanitizeCandidates(candidates: SectionCandidate[], section: IncidentSectionKey, hasDocumentGrounding: boolean) {
@@ -1683,7 +1731,7 @@ function sanitizeCandidates(candidates: SectionCandidate[], section: IncidentSec
       continue;
     }
 
-    if (section === "next_actions" && output.length < 3 && candidate.provenance === "case_history") {
+    if (section === "actions" && output.length < 3 && candidate.provenance === "case_history") {
       continue;
     }
 
@@ -1709,18 +1757,17 @@ function buildIncidentDraft(message: string, signature: SymptomSignature, bundle
     "checks",
     bundle.baselineDocs.length + bundle.processDocs.length > 0,
   );
-  const nextActions = sanitizeCandidates(
-    buildNextActionCandidates(message, signature, bundle),
-    "next_actions",
+  const actions = sanitizeCandidates(
+    buildActionCandidates(message, signature, bundle),
+    "actions",
     bundle.baselineDocs.length + bundle.processDocs.length > 0,
   );
-  const fallbackUsed = bundle.fallbackNeeded || (checks[0]?.provenance === "inferred" && nextActions[0]?.provenance === "inferred");
+  const fallbackUsed = bundle.fallbackNeeded || (checks[0]?.provenance === "inferred" && actions[0]?.provenance === "inferred");
 
   return {
     suspectedCauses,
     checks,
-    nextActions,
-    hospitalReply: buildHospitalReply(signature, checks, nextActions, fallbackUsed),
+    actions,
     fallbackUsed,
   };
 }
@@ -1736,7 +1783,6 @@ function buildCompositionPrompt(signature: SymptomSignature, draft: IncidentDraf
         "이미 relevance gate를 통과한 후보만 받는다.",
         "새 사실을 추가하지 말고, 의미를 바꾸지 않는 범위에서만 문장을 다듬는다.",
         "baseline_doc을 process_doc보다 우선하고, case_history는 보조적으로만 유지한다.",
-        "guide_overview와 guide_steps는 incident 응답에서 비워둔다.",
       ].join("\n"),
     ),
     new HumanMessage(
@@ -1754,10 +1800,8 @@ function buildCompositionPrompt(signature: SymptomSignature, draft: IncidentDraf
         "[checks]",
         serializeSection(draft.checks),
         "",
-        "[next_actions]",
-        serializeSection(draft.nextActions),
-        "",
-        `[hospital_reply]\n${draft.hospitalReply}`,
+        "[actions]",
+        serializeSection(draft.actions),
       ].join("\n"),
     ),
   ];
@@ -1774,7 +1818,7 @@ async function composeIncidentDraft(signature: SymptomSignature, draft: Incident
     if (
       response.suspected_causes.length === draft.suspectedCauses.length &&
       response.checks.length === draft.checks.length &&
-      response.next_actions.length === draft.nextActions.length
+      response.actions.length === draft.actions.length
     ) {
       return {
         suspectedCauses: draft.suspectedCauses.map((item, index) => ({
@@ -1785,11 +1829,10 @@ async function composeIncidentDraft(signature: SymptomSignature, draft: Incident
           ...item,
           text: response.checks[index] ?? item.text,
         })),
-        nextActions: draft.nextActions.map((item, index) => ({
+        actions: draft.actions.map((item, index) => ({
           ...item,
-          text: response.next_actions[index] ?? item.text,
+          text: response.actions[index] ?? item.text,
         })),
-        hospitalReply: response.hospital_reply || draft.hospitalReply,
         fallbackUsed: draft.fallbackUsed,
       } satisfies IncidentDraft;
     }
@@ -1800,86 +1843,99 @@ async function composeIncidentDraft(signature: SymptomSignature, draft: Incident
   return draft;
 }
 
-function buildRelatedGuidePreview(bundle: GroundedEvidenceBundle, draft?: IncidentDraft): GuidePreview {
-  const guides = [...bundle.baselineDocs, ...bundle.processDocs];
+function buildBaselineReference(message: string, bundle: GroundedEvidenceBundle, draft?: IncidentDraft): BaselineReference | null {
+  const docs = bundle.baselineDocs.length > 0 ? bundle.baselineDocs.slice(0, 4) : bundle.processDocs.slice(0, 3);
 
-  if (guides.length === 0) {
-    return {
-      show_related_guide: false,
-      related_guide_title: "",
-      related_guide_excerpt: "",
-      related_guide_reason: "",
-    };
+  if (docs.length === 0) {
+    return null;
   }
 
   const referencedEvidenceIds = new Set(
-    [draft?.checks ?? [], draft?.nextActions ?? [], draft?.suspectedCauses ?? []]
+    [draft?.checks ?? [], draft?.actions ?? [], draft?.suspectedCauses ?? []]
       .flat()
       .map((item) => item.evidenceId)
       .filter((item): item is string => Boolean(item)),
   );
-  const scoredGuides = guides.map((item) => {
-    const excerptLines = pickTopLines(item.title, [item], 4, 4);
-    const referenceBoost = referencedEvidenceIds.has(item.id) ? 18 : 0;
-    const provenanceBoost = item.provenance === "baseline_doc" ? 8 : 0;
 
-    return {
-      item,
-      score: excerptLines.reduce((sum, line) => sum + line.score, 0) + referenceBoost + provenanceBoost,
-    };
-  });
+  const scoredLines = docs.flatMap((item) =>
+    extractEvidenceLines(item)
+      .filter((line) => line.length >= 4)
+      .map((line) => {
+        const features = classifyLineFeatures(line);
+        const featureSet = new Set(features);
+        const featureBoost =
+          (featureSet.has("menu_path") ? 10 : 0) +
+          (featureSet.has("test_step") ? 12 : 0) +
+          (featureSet.has("config_step") ? 12 : 0) +
+          (featureSet.has("install_step") ? 10 : 0) +
+          (featureSet.has("guide_hint") ? 6 : 0);
 
-  scoredGuides.sort((left, right) => {
-    if (right.score !== left.score) {
-      return right.score - left.score;
+        return {
+          text: line,
+          evidenceId: item.id,
+          score:
+            scoreEvidenceLine(message, item, line) +
+            featureBoost +
+            (referencedEvidenceIds.has(item.id) ? 12 : 0) +
+            (item.provenance === "baseline_doc" ? 8 : 0),
+          features,
+        };
+      }),
+  );
+
+  scoredLines.sort((left, right) => right.score - left.score);
+
+  const selected: typeof scoredLines = [];
+  const seenText = new Set<string>();
+  const coveredFeatures = new Set<LineFeature>();
+  const featureOrder: LineFeature[] = ["menu_path", "test_step", "config_step", "install_step", "guide_hint"];
+
+  for (const feature of featureOrder) {
+    const candidate = scoredLines.find((item) => item.features.includes(feature) && !seenText.has(toComparableText(item.text)));
+
+    if (!candidate) {
+      continue;
     }
 
-    if (PROVENANCE_PRIORITY[left.item.provenance] !== PROVENANCE_PRIORITY[right.item.provenance]) {
-      return PROVENANCE_PRIORITY[left.item.provenance] - PROVENANCE_PRIORITY[right.item.provenance];
+    selected.push(candidate);
+    seenText.add(toComparableText(candidate.text));
+    candidate.features.forEach((item) => coveredFeatures.add(item));
+
+    if (selected.length >= 6) {
+      break;
     }
-
-    return right.item.alignmentScore - left.item.alignmentScore;
-  });
-
-  const topGuide = scoredGuides[0]?.item;
-
-  if (!topGuide) {
-    return {
-      show_related_guide: false,
-      related_guide_title: "",
-      related_guide_excerpt: "",
-      related_guide_reason: "",
-    };
   }
 
-  const excerpt = pickTopLines(topGuide.title, [topGuide], 4, 4)
-    .map((item) => `- ${item.text}`)
-    .join("\n");
-  const title = topGuide.sourceFile ? `${topGuide.sourceFile} - ${topGuide.title}` : topGuide.title;
-  const reason = topGuide.sourceFile
-    ? `${topGuide.sourceFile}에서 직접 참조한 기준문서/운영절차입니다.`
-    : "이번 응답에서 직접 참조한 기준문서/운영절차입니다.";
+  for (const item of scoredLines) {
+    const key = toComparableText(item.text);
+
+    if (seenText.has(key)) {
+      continue;
+    }
+
+    selected.push(item);
+    seenText.add(key);
+    item.features.forEach((feature) => coveredFeatures.add(feature));
+
+    if (selected.length >= 6) {
+      break;
+    }
+  }
+
+  if (!selected.some((item) => item.features.includes("test_step"))) {
+    const bestTestLine = scoredLines.find((item) => item.features.includes("test_step"));
+
+    if (bestTestLine && !seenText.has(toComparableText(bestTestLine.text))) {
+      selected.unshift(bestTestLine);
+      seenText.add(toComparableText(bestTestLine.text));
+    }
+  }
 
   return {
-    show_related_guide: Boolean(excerpt),
-    related_guide_title: title,
-    related_guide_excerpt: excerpt,
-    related_guide_reason: reason,
+    source_titles: uniqueStrings(docs.map((item) => item.title), 3),
+    source_files: uniqueStrings(docs.map((item) => item.sourceFile), 2),
+    excerpts: selected.slice(0, 6).map((item) => item.text),
   };
-}
-
-function formatMostSimilarCase(evidence: RetrievedEvidence | undefined, hasDocumentGrounding: boolean) {
-  if (!evidence?.summary) {
-    return "";
-  }
-
-  const prefix = hasDocumentGrounding ? "유사 사례 참고(문서 우선):" : "유사 사례 참고:";
-  return [
-    prefix,
-    `증상 ${evidence.summary.problem_summary || "기록 없음"}`,
-    `원인 ${evidence.summary.root_cause || "기록 없음"}`,
-    `조치 ${evidence.summary.resolution_action || "기록 없음"}`,
-  ].join(" / ");
 }
 
 function buildGuideResponse(
@@ -1897,47 +1953,38 @@ function buildGuideResponse(
       query_mode: "guide",
       suspected_causes: [],
       checks: [],
-      next_actions: [],
-      guide_overview: "현재는 관련 기준문서를 직접 특정하기 어려워 실제 메뉴명과 설정 경로 확인이 필요합니다.",
-      guide_steps: [
-        "- 실제 화면명, 메뉴 경로, 설정값을 추가로 확인해 주세요.",
-        "- 기준문서와 바로 연결되는 키워드가 확보되면 다시 안내드리겠습니다.",
-      ],
-      hospital_reply: "",
-      show_related_guide: false,
-      related_guide_title: "",
-      related_guide_excerpt: "",
-      related_guide_reason: "",
+      actions: ["[추정 보완] 실제 화면명, 메뉴 경로, 설정값을 추가로 확인해 주세요."],
+      baseline_reference: null,
       confidence_level: confidenceLevel,
       confidence_note: buildGuideConfidenceNote(confidenceLevel, topSimilarity, 0),
       similar_case_count: 0,
       top_similarity: topSimilarity,
-      most_similar_case_summary: "",
       similar_cases: [],
       fallback_used: true,
     };
   }
 
-  const steps = pickTopLines(signature.symptomSummary, docs, 8, 3).map((item) => `- ${item.text}`);
-  const titles = uniqueStrings(docs.slice(0, 3).map((item) => item.title), 3);
+  const actions = uniqueStrings(
+    buildLineCandidates(signature.symptomSummary, docs, SECTION_LIMITS.actions, 2).map((item) =>
+      withProvenanceLabel(item.text, item.provenance),
+    ),
+    SECTION_LIMITS.actions,
+  );
 
   return {
     query_mode: "guide",
     suspected_causes: [],
     checks: [],
-    next_actions: [],
-    guide_overview: `관련 문서 우선순위: ${titles.join(" / ")}. 문서에 있는 메뉴명, 설정명, 절차만 중심으로 정리했습니다.`,
-    guide_steps: steps.length > 0 ? steps : ["- 관련 문서의 직접 근거가 부족해 메뉴 경로 확인이 먼저 필요합니다."],
-    hospital_reply: "",
-    show_related_guide: false,
-    related_guide_title: "",
-    related_guide_excerpt: "",
-    related_guide_reason: "",
+    actions: actions.length > 0 ? actions : ["[추정 보완] 관련 문서의 직접 근거가 부족해 메뉴 경로 확인이 먼저 필요합니다."],
+    baseline_reference: buildBaselineReference(signature.symptomSummary, {
+      ...bundle,
+      baselineDocs: docs,
+      processDocs: [],
+    }),
     confidence_level: confidenceLevel,
     confidence_note: buildGuideConfidenceNote(confidenceLevel, topSimilarity, docs.length),
     similar_case_count: 0,
     top_similarity: topSimilarity,
-    most_similar_case_summary: "",
     similar_cases: [],
     fallback_used: false,
   };
@@ -1960,7 +2007,7 @@ function finalizeIncidentResponse(
   const topSimilarity =
     bundle.baselineDocs[0]?.similarity ?? bundle.processDocs[0]?.similarity ?? similarCaseEvidence[0]?.similarity ?? null;
   const confidenceLevel = determineConfidenceLevel(topSimilarity, highThreshold, lowThreshold);
-  const guidePreview = buildRelatedGuidePreview(bundle, draft);
+  const baselineReference = buildBaselineReference(signature.symptomSummary, bundle, draft);
 
   return {
     query_mode: "incident",
@@ -1972,14 +2019,11 @@ function finalizeIncidentResponse(
       draft.checks.map((item) => withProvenanceLabel(item.text, item.provenance)),
       SECTION_LIMITS.checks,
     ),
-    next_actions: uniqueStrings(
-      draft.nextActions.map((item) => withProvenanceLabel(item.text, item.provenance)),
-      SECTION_LIMITS.next_actions,
+    actions: uniqueStrings(
+      draft.actions.map((item) => withProvenanceLabel(item.text, item.provenance)),
+      SECTION_LIMITS.actions,
     ),
-    guide_overview: "",
-    guide_steps: [],
-    hospital_reply: draft.hospitalReply,
-    ...guidePreview,
+    baseline_reference: baselineReference,
     confidence_level: confidenceLevel,
     confidence_note: buildConfidenceNote(
       confidenceLevel,
@@ -1990,7 +2034,6 @@ function finalizeIncidentResponse(
     ),
     similar_case_count: similarCases.length,
     top_similarity: topSimilarity,
-    most_similar_case_summary: formatMostSimilarCase(similarCaseEvidence[0], bundle.baselineDocs.length + bundle.processDocs.length > 0),
     similar_cases: similarCases,
     fallback_used: confidenceLevel === "low" || draft.fallbackUsed,
   };

@@ -1,48 +1,43 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 import type { ChatApiResponse } from "@/lib/types";
 
 function buildCopyText(result: ChatApiResponse) {
-  const lines =
-    result.query_mode === "guide"
-      ? [
-          "가이드라인 안내",
-          result.guide_overview,
-          "",
-          "원문 발췌",
-          ...result.guide_steps,
-        ]
-      : [
-          "의심되는 원인",
-          ...result.suspected_causes.map((item, index) => `${index + 1}. ${item}`),
-          "",
-          "우선 확인사항",
-          ...result.checks.map((item, index) => `${index + 1}. ${item}`),
-          "",
-          "권장 대응 방향",
-          ...result.next_actions.map((item, index) => `${index + 1}. ${item}`),
-        ];
+  const lines: string[] = [];
 
-  if (result.hospital_reply) {
-    lines.push("", "병원 안내용 답변", result.hospital_reply);
+  if (result.suspected_causes.length > 0) {
+    lines.push("의심되는 원인", ...result.suspected_causes.map((item, index) => `${index + 1}. ${item}`));
   }
 
-  if (result.show_related_guide && result.related_guide_excerpt) {
+  if (result.checks.length > 0) {
+    lines.push("", "우선 확인사항", ...result.checks.map((item, index) => `${index + 1}. ${item}`));
+  }
+
+  if (result.actions.length > 0) {
+    lines.push("", "권장 대응 방향", ...result.actions.map((item, index) => `${index + 1}. ${item}`));
+  }
+
+  if (result.baseline_reference?.excerpts.length) {
     lines.push(
       "",
-      `관련 기준 가이드: ${result.related_guide_title || "관련 기준 가이드"}`,
-      result.related_guide_reason,
-      "",
-      result.related_guide_excerpt,
+      "기본 세팅 기준 보기",
+      `참조 문서: ${[...result.baseline_reference.source_files, ...result.baseline_reference.source_titles].filter(Boolean).join(" / ")}`,
+      ...result.baseline_reference.excerpts.map((item, index) => `${index + 1}. ${item}`),
     );
   }
 
-  if (result.most_similar_case_summary) {
-    lines.push("", `가장 유사한 사례 요약: ${result.most_similar_case_summary}`);
+  if (result.similar_cases.length > 0) {
+    lines.push("", "유사 사례 요약");
+    result.similar_cases.forEach((item, index) => {
+      lines.push(
+        `${index + 1}. ${item.problem_summary}`,
+        `원인: ${item.root_cause || "기록 없음"}`,
+        `조치: ${item.resolution_action || "기록 없음"}`,
+        `결과: ${item.resolution_result || "기록 없음"}`,
+      );
+    });
   }
 
   return lines.join("\n");
@@ -62,22 +57,6 @@ export function SupportWorkspace() {
     if (!result) return "";
     if (result.confidence_level === "low") return "warning";
     return "";
-  }, [result]);
-  const isGuideMode = result?.query_mode === "guide";
-  const hasRelatedGuide = Boolean(result?.show_related_guide && result.related_guide_excerpt);
-  const guideMarkdown = useMemo(() => {
-    if (!result || result.query_mode !== "guide") {
-      return "";
-    }
-
-    return result.guide_steps.join("\n");
-  }, [result]);
-  const relatedGuideMarkdown = useMemo(() => {
-    if (!result || !result.show_related_guide) {
-      return "";
-    }
-
-    return result.related_guide_excerpt;
   }, [result]);
 
   async function handleSubmit() {
@@ -100,11 +79,11 @@ export function SupportWorkspace() {
         const payload = (await response.json()) as ChatApiResponse | { error?: string };
 
         if (!response.ok || !("suspected_causes" in payload)) {
-          const errorMessage =
+          const nextError =
             "error" in payload && typeof payload.error === "string"
               ? payload.error
               : "요청을 처리하지 못했습니다.";
-          throw new Error(errorMessage);
+          throw new Error(nextError);
         }
 
         setResult(payload);
@@ -176,162 +155,94 @@ export function SupportWorkspace() {
                   </button>
                 </div>
 
-                {isGuideMode ? (
-                  <div className="results-grid">
+                <div className="results-stack">
+                  {result.suspected_causes.length > 0 && (
                     <section className="result-card">
-                      <h3>가이드라인 안내</h3>
-                      <div className="reply-box">{result.guide_overview}</div>
-                      {guideMarkdown && (
-                        <div className="guide-markdown-shell">
-                          <article className="markdown-body guide-markdown">
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              components={{
-                                a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
-                              }}
-                            >
-                              {guideMarkdown}
-                            </ReactMarkdown>
-                          </article>
+                      <h3>의심되는 원인</h3>
+                      <ol className="result-list">
+                        {result.suspected_causes.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ol>
+                    </section>
+                  )}
+
+                  {result.checks.length > 0 && (
+                    <section className="result-card">
+                      <h3>우선 확인사항</h3>
+                      <ol className="result-list">
+                        {result.checks.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ol>
+                    </section>
+                  )}
+
+                  {result.actions.length > 0 && (
+                    <section className="result-card">
+                      <h3>권장 대응 방향</h3>
+                      <ol className="result-list">
+                        {result.actions.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ol>
+                    </section>
+                  )}
+
+                  {result.baseline_reference?.excerpts.length ? (
+                    <section className="result-card">
+                      <h3>기본 세팅 기준 보기</h3>
+                      {(result.baseline_reference.source_files.length > 0 || result.baseline_reference.source_titles.length > 0) && (
+                        <div className="baseline-meta">
+                          {[...result.baseline_reference.source_files, ...result.baseline_reference.source_titles].join(" / ")}
                         </div>
                       )}
+                      <ol className="result-list">
+                        {result.baseline_reference.excerpts.map((item) => (
+                          <li key={item}>{item}</li>
+                        ))}
+                      </ol>
                     </section>
+                  ) : null}
+
+                  {result.similar_cases.length > 0 && (
                     <section className="result-card">
-                      <h3>응답 메타</h3>
-                      <div className="meta-row">
-                        <span className="meta-pill">신뢰도: {result.confidence_level}</span>
-                        <span className="meta-pill">유사 사례 {result.similar_case_count}건</span>
-                        {typeof result.top_similarity === "number" && (
-                          <span className="meta-pill">
-                            최고 유사도 {result.top_similarity.toFixed(2)}
-                          </span>
-                        )}
+                      <h3>유사 사례 요약</h3>
+                      <div className="case-list">
+                        {result.similar_cases.map((item) => (
+                          <article key={item.case_key} className="case-card">
+                            <h4>{item.problem_summary}</h4>
+                            <p>
+                              <strong>원인:</strong> {item.root_cause || "기록 없음"}
+                            </p>
+                            <p>
+                              <strong>조치:</strong> {item.resolution_action || "기록 없음"}
+                            </p>
+                            <p>
+                              <strong>결과:</strong> {item.resolution_result || "기록 없음"}
+                            </p>
+                            <div className="meta-row">
+                              <span className="meta-pill">사례 {item.case_key}</span>
+                              <span className="meta-pill">유사도 {item.similarity_score.toFixed(2)}</span>
+                              {item.issue_subtype_label && <span className="meta-pill">{item.issue_subtype_label}</span>}
+                            </div>
+                          </article>
+                        ))}
                       </div>
                     </section>
-                  </div>
-                ) : (
-                  <>
-                    <div className={`incident-layout ${hasRelatedGuide ? "with-guide" : ""}`}>
-                      <div className="incident-main">
-                        <section className="result-card">
-                          <h3>의심되는 원인</h3>
-                          <ol className="result-list">
-                            {result.suspected_causes.map((item) => (
-                              <li key={item}>{item}</li>
-                            ))}
-                          </ol>
-                        </section>
+                  )}
 
-                        {result.checks.length > 0 && (
-                          <section className="result-card">
-                            <h3>우선 확인사항</h3>
-                            <ol className="result-list">
-                              {result.checks.map((item) => (
-                                <li key={item}>{item}</li>
-                              ))}
-                            </ol>
-                          </section>
-                        )}
-
-                        {result.next_actions.length > 0 && (
-                          <section className="result-card">
-                            <h3>권장 대응 방향</h3>
-                            <ol className="result-list">
-                              {result.next_actions.map((item) => (
-                                <li key={item}>{item}</li>
-                              ))}
-                            </ol>
-                          </section>
-                        )}
-
-                        {result.hospital_reply && (
-                          <section className="result-card">
-                            <h3>병원 안내용 답변</h3>
-                            <div className="reply-box">{result.hospital_reply}</div>
-                          </section>
-                        )}
-                      </div>
-
-                      <aside className="incident-side">
-                        {hasRelatedGuide && (
-                          <section className="result-card guide-support-card">
-                            <h3>기본 세팅 기준 보기</h3>
-                            <details className="guide-accordion">
-                              <summary>관련 기준 가이드 보기</summary>
-                              {result.related_guide_reason && (
-                                <p className="guide-accordion-copy">{result.related_guide_reason}</p>
-                              )}
-                              {result.related_guide_title && (
-                                <div className="guide-accordion-title">{result.related_guide_title}</div>
-                              )}
-                              {relatedGuideMarkdown && (
-                                <article className="markdown-body guide-markdown guide-markdown-secondary">
-                                  <ReactMarkdown
-                                    remarkPlugins={[remarkGfm]}
-                                    components={{
-                                      a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
-                                    }}
-                                  >
-                                    {relatedGuideMarkdown}
-                                  </ReactMarkdown>
-                                </article>
-                              )}
-                            </details>
-                          </section>
-                        )}
-
-                        <section className="result-card">
-                          <h3>응답 메타</h3>
-                          <div className="meta-row">
-                            <span className="meta-pill">신뢰도: {result.confidence_level}</span>
-                            <span className="meta-pill">유사 사례 {result.similar_case_count}건</span>
-                            {typeof result.top_similarity === "number" && (
-                              <span className="meta-pill">
-                                최고 유사도 {result.top_similarity.toFixed(2)}
-                              </span>
-                            )}
-                          </div>
-                        </section>
-
-                        {result.most_similar_case_summary && (
-                          <section className="result-card">
-                            <h3>가장 유사한 사례 요약</h3>
-                            <div className="reply-box">{result.most_similar_case_summary}</div>
-                          </section>
-                        )}
-                      </aside>
+                  <section className="result-card">
+                    <h3>응답 메타</h3>
+                    <div className="meta-row">
+                      <span className="meta-pill">신뢰도: {result.confidence_level}</span>
+                      <span className="meta-pill">유사 사례 {result.similar_case_count}건</span>
+                      {typeof result.top_similarity === "number" && (
+                        <span className="meta-pill">최고 유사도 {result.top_similarity.toFixed(2)}</span>
+                      )}
                     </div>
-
-                    {result.similar_cases.length > 0 && (
-                      <section className="result-card">
-                        <h3>유사 사례 참고</h3>
-                        <div className="results-grid">
-                          {result.similar_cases.map((item) => (
-                            <article key={item.case_key} className="case-card">
-                              <h4>{item.problem_summary}</h4>
-                              <p>
-                                <strong>원인:</strong> {item.root_cause || "기록 없음"}
-                              </p>
-                              <p>
-                                <strong>조치:</strong> {item.resolution_action || "기록 없음"}
-                              </p>
-                              <p>
-                                <strong>결과:</strong> {item.resolution_result || "기록 없음"}
-                              </p>
-                              <div className="meta-row">
-                                <span className="meta-pill">사례 {item.case_key}</span>
-                                <span className="meta-pill">유사도 {item.similarity_score.toFixed(2)}</span>
-                                {item.issue_subtype_label && (
-                                  <span className="meta-pill">{item.issue_subtype_label}</span>
-                                )}
-                              </div>
-                            </article>
-                          ))}
-                        </div>
-                      </section>
-                    )}
-                  </>
-                )}
+                  </section>
+                </div>
               </>
             )}
           </div>

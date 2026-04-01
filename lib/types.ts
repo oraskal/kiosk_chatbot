@@ -35,23 +35,22 @@ export interface SimilarCaseSummary {
   similarity_score: number;
 }
 
+export interface BaselineReference {
+  source_titles: string[];
+  source_files: string[];
+  excerpts: string[];
+}
+
 export interface ChatApiResponse {
   query_mode: QueryMode;
   suspected_causes: string[];
   checks: string[];
-  next_actions: string[];
-  guide_overview: string;
-  guide_steps: string[];
-  hospital_reply: string;
-  show_related_guide: boolean;
-  related_guide_title: string;
-  related_guide_excerpt: string;
-  related_guide_reason: string;
+  actions: string[];
+  baseline_reference?: BaselineReference | null;
   confidence_level: ConfidenceLevel;
   confidence_note: string;
   similar_case_count: number;
   top_similarity: number | null;
-  most_similar_case_summary: string;
   similar_cases: SimilarCaseSummary[];
   fallback_used: boolean;
 }
