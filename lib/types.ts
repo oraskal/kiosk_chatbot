@@ -42,6 +42,7 @@ export interface ChatApiResponse {
   next_actions: string[];
   guide_overview: string;
   guide_steps: string[];
+  hospital_reply: string;
   show_related_guide: boolean;
   related_guide_title: string;
   related_guide_excerpt: string;

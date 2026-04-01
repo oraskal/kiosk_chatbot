@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test": "tsx --test lib/rag/workflow.test.ts",
     "ingest": "tsx scripts/ingest.ts",
     "reindex": "tsx scripts/ingest.ts --reset"
   },

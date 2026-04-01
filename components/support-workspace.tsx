@@ -27,6 +27,10 @@ function buildCopyText(result: ChatApiResponse) {
           ...result.next_actions.map((item, index) => `${index + 1}. ${item}`),
         ];
 
+  if (result.hospital_reply) {
+    lines.push("", "병원 안내용 답변", result.hospital_reply);
+  }
+
   if (result.show_related_guide && result.related_guide_excerpt) {
     lines.push(
       "",
@@ -237,6 +241,13 @@ export function SupportWorkspace() {
                                 <li key={item}>{item}</li>
                               ))}
                             </ol>
+                          </section>
+                        )}
+
+                        {result.hospital_reply && (
+                          <section className="result-card">
+                            <h3>병원 안내용 답변</h3>
+                            <div className="reply-box">{result.hospital_reply}</div>
                           </section>
                         )}
                       </div>

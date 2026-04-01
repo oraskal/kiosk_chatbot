@@ -38,10 +38,14 @@
 - CSV 사례 데이터와 `kiosk_baseline_guide.md` 를 함께 적재하는 ingest 스크립트
 - `/api/health` 헬스체크 API
 - 장애 답변에서 과거 지원내역보다 기본 설정 이탈 여부를 먼저 보도록 강제하는 로직
-- 장애 답변의 `우선 확인사항` 첫 문장을 `배포 기본 세팅 기준으로 보면 ... 항목을 우선 확인해야 합니다.` 형식으로 보정하는 로직
+- retrieval 후처리에서 baseline/guide/setup/manual 계열 문서를 사례보다 먼저 재정렬하는 로직
+- 답변 bullet마다 `기준 문서 / 유사 사례 / 추가 확인` 성격을 구분하고, 기준 문서 근거가 가장 강한 항목부터 상단에 배치하는 governor 로직
+- `장치 관리자`, `드라이버`, `방화벽`, `네트워크 문제` 같은 범용 트러블슈팅 문구를 문서 근거 없이는 상단에 올리지 않는 전역 sanitizer
+- 문서 근거가 약할 때는 일반론 대신 보수적으로 답하는 fallback 로직
+- 병원 안내용 답변 섹션 추가
 - 기준 가이드 질문 시 관련 섹션 요약과 원문 발췌 제공
 - 유사 사례 개수, 최고 유사도 참고값, 가장 유사한 사례 요약 제공
-- 유사 사례가 약할 때 단정하지 않고 확인 포인트 중심으로 답하는 fallback 로직
+- `kiosk_baseline_guide.md` 외에도 guide/manual/setup/install 성격의 마크다운 문서를 함께 인덱싱할 수 있는 ingest 로직
 
 ## 3. 폴더 구조
 
@@ -284,6 +288,7 @@ npm run reindex
 
 - `npm run ingest`: 기존 데이터에 추가 적재
 - `npm run reindex`: 기존 벡터 데이터를 비우고 다시 적재
+- `npm test`: baseline-first 회귀 테스트 실행
 
 실무에서는 CSV나 기준 가이드가 바뀌었으면 `npm run reindex` 를 쓰는 편이 안전합니다.
 

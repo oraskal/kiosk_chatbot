@@ -16,7 +16,25 @@ type GuideChunk = GuideSection & {
   chunkIndex: number;
 };
 
-const BASELINE_GUIDE_FILE_NAME = "kiosk_baseline_guide.md";
+type GuideSourceType = "baseline_guide" | "official_guide";
+
+function classifyGuideSource(fileName: string): GuideSourceType | null {
+  const normalized = fileName.toLowerCase();
+
+  if (!normalized.endsWith(".md")) {
+    return null;
+  }
+
+  if (/(baseline|기준)/i.test(normalized)) {
+    return "baseline_guide";
+  }
+
+  if (/(guide|manual|setup|install|운영|설치)/i.test(normalized)) {
+    return "official_guide";
+  }
+
+  return null;
+}
 
 function clean(value: string | undefined) {
   return (value ?? "").trim();
@@ -188,7 +206,7 @@ export async function findBaselineGuideFiles() {
   const config = getAppConfig();
   const candidates = [path.resolve(process.cwd(), config.CSV_SOURCE_DIR), process.cwd()];
   const seen = new Set<string>();
-  const files: string[] = [];
+  const files: Array<{ path: string; sourceType: GuideSourceType }> = [];
 
   for (const directory of candidates) {
     if (seen.has(directory)) {
@@ -205,8 +223,13 @@ export async function findBaselineGuideFiles() {
           continue;
         }
 
-        if (entry.name.toLowerCase() === BASELINE_GUIDE_FILE_NAME) {
-          files.push(path.join(directory, entry.name));
+        const sourceType = classifyGuideSource(entry.name);
+
+        if (sourceType) {
+          files.push({
+            path: path.join(directory, entry.name),
+            sourceType,
+          });
         }
       }
     } catch {
@@ -214,7 +237,9 @@ export async function findBaselineGuideFiles() {
     }
   }
 
-  return [...new Set(files)].sort((left, right) => left.localeCompare(right));
+  return files
+    .filter((item, index, all) => all.findIndex((entry) => entry.path === item.path) === index)
+    .sort((left, right) => left.path.localeCompare(right.path));
 }
 
 export async function loadSupportCaseRows() {
@@ -288,7 +313,7 @@ export async function buildBaselineGuideDocuments() {
   const documents: Document[] = [];
 
   for (const file of files) {
-    const markdown = await readFile(file, "utf-8");
+    const markdown = await readFile(file.path, "utf-8");
     const sections = splitGuideIntoSections(markdown);
 
     for (const section of sections) {
@@ -304,11 +329,11 @@ export async function buildBaselineGuideDocuments() {
               chunk.body,
             ].join("\n"),
             metadata: {
-              source_type: "baseline_guide",
+              source_type: file.sourceType,
               guide_section_title: chunk.title,
               guide_chunk_index: chunk.chunkIndex,
-              source_file: path.basename(file),
-              quality_tier: "guide_baseline",
+              source_file: path.basename(file.path),
+              quality_tier: file.sourceType === "baseline_guide" ? "guide_baseline" : "guide_official",
             },
           }),
         );
